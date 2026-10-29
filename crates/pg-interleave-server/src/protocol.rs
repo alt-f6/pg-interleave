@@ -15,6 +15,7 @@ pub struct PgMessage {
 }
 
 impl PgMessage {
+    #[allow(dead_code)]
     pub fn tag_char(&self) -> String {
         match self.tag {
             Some(t) => (t as char).to_string(),
@@ -62,7 +63,7 @@ pub fn decode_regular_message(src: &mut BytesMut) -> Result<Option<PgMessage>> {
     let len = u32::from_be_bytes([src[1], src[2], src[3], src[4]]) as usize;
 
     if len < 4 {
-        bail!("Некорректная длина пакета Postgres: {}", len);
+        bail!("Invalid Postgres packet length: {}", len);
     }
 
     if src.len() < 1 + len {
@@ -99,10 +100,17 @@ pub fn extract_backend_key_data(msg: &PgMessage) -> Option<(u32, u32)> {
 }
 
 pub fn extract_query_text(msg: &PgMessage) -> Option<String> {
-    if msg.tag == Some(b'Q') {
-        let trimmed = msg.payload.strip_suffix(&[0]).unwrap_or(&msg.payload);
-        String::from_utf8(trimmed.to_vec()).ok()
-    } else {
-        None
+    match msg.tag {
+        Some(b'Q') => {
+            let trimmed = msg.payload.strip_suffix(&[0]).unwrap_or(&msg.payload);
+            String::from_utf8(trimmed.to_vec()).ok()
+        }
+        Some(b'P') => {
+            let mut parts = msg.payload.split(|&b| b == 0);
+            let _stmt_name = parts.next()?;
+            let query_bytes = parts.next()?;
+            String::from_utf8(query_bytes.to_vec()).ok()
+        }
+        _ => None,
     }
 }
