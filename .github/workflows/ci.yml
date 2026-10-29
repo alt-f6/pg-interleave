@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build pg-interleave proxy
+        run: cargo build --release -p pg-interleave-server
+
+      - name: Start pg-interleave proxy in background
+        run: |
+          ./target/release/pg-interleave-server --listen-addr 127.0.0.1:5433 --target-addr 127.0.0.1:5432 --control-addr 127.0.0.1:9090 &
+          sleep 2
+
+      - name: Install SDK dependencies
+        working-directory: packages/sdk-ts
+        run: npm ci
+
+      - name: Run Vitest Integration Tests
+        working-directory: packages/sdk-ts
+        run: npm test
