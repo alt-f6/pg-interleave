@@ -1,0 +1,3 @@
+[workspace]
+members = ["crates/pg-interleave-server"]
+resolver = "2"
