@@ -6,10 +6,15 @@ use tokio::sync::{Mutex, oneshot};
 use tracing::info;
 
 #[allow(dead_code)]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
 pub enum BarrierAction {
+    #[serde(alias = "PauseBeforeQuery", alias = "PAUSE_BEFORE_QUERY")]
     PauseBeforeQuery,
+    #[serde(alias = "PauseAfterResponse", alias = "PAUSE_AFTER_RESPONSE")]
     PauseAfterResponse,
+    #[serde(alias = "DropConnectionOnCommit", alias = "DROP_CONNECTION_ON_COMMIT")]
+    DropConnectionOnCommit,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -73,16 +78,23 @@ impl SharedState {
 
         let mut matched_rule: Option<InterceptRule> = None;
         for rule in &state.rules {
+            // КРИТИЧЕСКИ ВАЖНО: правила на разрыв коннекта не должны тормозить отправку запроса!
+            if rule.action == BarrierAction::DropConnectionOnCommit {
+                continue;
+            }
+
             if let Some(target_pid) = rule.target_pid
-                && Some(target_pid) != pid {
-                    continue;
-                }
+                && Some(target_pid) != pid
+            {
+                continue;
+            }
 
             if let Ok(re) = Regex::new(&rule.query_pattern)
-                && re.is_match(query) {
-                    matched_rule = Some(rule.clone());
-                    break;
-                }
+                && re.is_match(query)
+            {
+                matched_rule = Some(rule.clone());
+                break;
+            }
         }
 
         if let Some(rule) = matched_rule {
@@ -110,28 +122,50 @@ impl SharedState {
         None
     }
 
-    /// Resumes execution for a specific barrier by its ID
     pub async fn resume_barrier(&self, barrier_id: &str) -> bool {
         let mut state = self.0.lock().await;
         if let Some(mut barrier) = state.active_barriers.remove(barrier_id)
-            && let Some(tx) = barrier.resume_sender.take() {
-                let _ = tx.send(());
-                info!(barrier_id = %barrier_id, "Barrier released successfully");
-                return true;
-            }
+            && let Some(tx) = barrier.resume_sender.take()
+        {
+            let _ = tx.send(());
+            info!(barrier_id = %barrier_id, "Barrier released successfully");
+            return true;
+        }
         false
     }
 
-    /// Resumes execution of the first active barrier in the queue
     pub async fn resume_first(&self) -> Option<String> {
         let mut state = self.0.lock().await;
         let first_key = state.active_barriers.keys().next().cloned()?;
         if let Some(mut barrier) = state.active_barriers.remove(&first_key)
-            && let Some(tx) = barrier.resume_sender.take() {
-                let _ = tx.send(());
-                info!(barrier_id = %first_key, "First active barrier in queue released successfully");
-                return Some(first_key);
-            }
+            && let Some(tx) = barrier.resume_sender.take()
+        {
+            let _ = tx.send(());
+            info!(barrier_id = %first_key, "First active barrier in queue released successfully");
+            return Some(first_key);
+        }
         None
+    }
+
+    pub async fn should_drop_on_commit(&self, pid: Option<u32>) -> bool {
+        let mut state = self.0.lock().await;
+        let mut should_drop = false;
+
+        state.rules.retain(|rule| {
+            if rule.action == BarrierAction::DropConnectionOnCommit {
+                if let Some(target_pid) = rule.target_pid {
+                    if Some(target_pid) == pid {
+                        should_drop = true;
+                        return false; // удаляем сработавшее одноразовое правило
+                    }
+                } else {
+                    should_drop = true;
+                    return false;
+                }
+            }
+            true
+        });
+
+        should_drop
     }
 }

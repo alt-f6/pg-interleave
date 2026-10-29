@@ -84,4 +84,21 @@ export class PgInterleaveClient {
 
     return new BarrierHandle(this.controlUrl);
   }
+
+  async injectTornCommit(client: Client): Promise<void> {
+    const pid = await this.getPid(client);
+    const res = await fetch(`${this.controlUrl}/intercept`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+            target_pid: pid,
+            query_pattern: "COMMIT",
+            action: "drop_connection_on_commit",
+        }),
+    });
+
+    if (!res.ok) {
+        throw new Error(`Failed to inject torn commit: HTTP ${res.status}`);
+    }
+  }
 }

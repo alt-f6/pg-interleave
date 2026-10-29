@@ -87,7 +87,6 @@ async fn handle_connection(
                             if let Some(sql) = extract_query_text(&m) {
                                 info!(conn_id, query = %sql, "-> Client query");
 
-                                // Check intercept barriers
                                 if let Some((barrier_id, receiver)) = state.check_and_create_barrier(server_pid, &sql).await {
                                     info!(conn_id, barrier_id = %barrier_id, "Waiting for resume command from controller...");
                                     let _ = receiver.await;
@@ -121,6 +120,19 @@ async fn handle_connection(
                                 state.register_pid(pid, conn_id).await;
                                 info!(conn_id, server_pid = pid, "Bound BackendKeyData");
                             }
+
+                            // Check: if server confirmed COMMIT and drop-on-commit rule is active
+                            if m.tag == Some(b'C') {
+                                let payload_str = String::from_utf8_lossy(&m.payload);
+                                if payload_str.starts_with("COMMIT")
+                                    && state.should_drop_on_commit(server_pid).await
+                                {
+                                    info!(conn_id, "CHAOS: Forcing TCP connection drop right after database COMMIT!");
+                                    // Terminate session immediately without sending CommandComplete to client
+                                    return Ok(());
+                                }
+                            }
+
                             client_write.write_all(&m.to_bytes()).await?;
                         }
                         None => break,
