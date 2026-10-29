@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{Mutex, oneshot};
-use tracing::info;
+use tracing::{info, warn};
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -15,13 +15,16 @@ pub enum BarrierAction {
     PauseAfterResponse,
     #[serde(alias = "DropConnectionOnCommit", alias = "DROP_CONNECTION_ON_COMMIT")]
     DropConnectionOnCommit,
+    #[serde(alias = "SyntheticDeadlock", alias = "SYNTHETIC_DEADLOCK")]
+    SyntheticDeadlock,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct InterceptRule {
+    #[serde(alias = "clientPid", alias = "client_pid", alias = "targetPid")]
     pub target_pid: Option<u32>,
+    #[serde(alias = "queryPattern", alias = "onQueryMatch")]
     pub query_pattern: String,
-    #[allow(dead_code)]
     pub action: BarrierAction,
 }
 
@@ -29,7 +32,6 @@ pub struct InterceptRule {
 pub struct ActiveBarrier {
     pub id: String,
     pub rule: InterceptRule,
-    pub reached: bool,
     pub resume_sender: Option<oneshot::Sender<()>>,
 }
 
@@ -38,6 +40,8 @@ pub struct BarrierState {
     pub rules: Vec<InterceptRule>,
     pub active_barriers: HashMap<String, ActiveBarrier>,
     pub pid_to_conn: HashMap<u32, u64>,
+    /// Connection ID -> (statement_name -> SQL query)
+    pub client_statements: HashMap<u64, HashMap<String, String>>,
 }
 
 #[derive(Clone)]
@@ -56,6 +60,7 @@ impl SharedState {
             }
         }
         state.rules.clear();
+        state.client_statements.clear();
         info!("Barrier state reset successfully");
     }
 
@@ -69,6 +74,37 @@ impl SharedState {
         state.pid_to_conn.insert(pid, conn_id);
     }
 
+    pub async fn store_statement(&self, conn_id: u64, stmt_name: String, query: String) {
+        let mut state = self.0.lock().await;
+        state
+            .client_statements
+            .entry(conn_id)
+            .or_default()
+            .insert(stmt_name, query);
+    }
+
+    /// Checks if the query matches a synthetic deadlock rule
+    pub async fn check_deadlock_match(&self, pid: Option<u32>, query: &str) -> bool {
+        let state = self.0.lock().await;
+        for rule in &state.rules {
+            if rule.action != BarrierAction::SyntheticDeadlock {
+                continue;
+            }
+            if let Some(target_pid) = rule.target_pid
+                && Some(target_pid) != pid
+            {
+                continue;
+            }
+            if let Ok(re) = Regex::new(&rule.query_pattern)
+                && re.is_match(query)
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Checks if the query matches a pause barrier rule
     pub async fn check_and_create_barrier(
         &self,
         pid: Option<u32>,
@@ -78,17 +114,14 @@ impl SharedState {
 
         let mut matched_rule: Option<InterceptRule> = None;
         for rule in &state.rules {
-            // КРИТИЧЕСКИ ВАЖНО: правила на разрыв коннекта не должны тормозить отправку запроса!
-            if rule.action == BarrierAction::DropConnectionOnCommit {
+            if rule.action != BarrierAction::PauseBeforeQuery {
                 continue;
             }
-
             if let Some(target_pid) = rule.target_pid
                 && Some(target_pid) != pid
             {
                 continue;
             }
-
             if let Ok(re) = Regex::new(&rule.query_pattern)
                 && re.is_match(query)
             {
@@ -110,7 +143,6 @@ impl SharedState {
                 ActiveBarrier {
                     id: barrier_id.clone(),
                     rule,
-                    reached: true,
                     resume_sender: Some(tx),
                 },
             );
@@ -120,6 +152,28 @@ impl SharedState {
         }
 
         None
+    }
+
+    pub async fn should_drop_on_commit(&self, pid: Option<u32>) -> bool {
+        let mut state = self.0.lock().await;
+        let mut should_drop = false;
+
+        state.rules.retain(|rule| {
+            if rule.action == BarrierAction::DropConnectionOnCommit {
+                if let Some(target_pid) = rule.target_pid {
+                    if Some(target_pid) == pid {
+                        should_drop = true;
+                        return false;
+                    }
+                } else {
+                    should_drop = true;
+                    return false;
+                }
+            }
+            true
+        });
+
+        should_drop
     }
 
     pub async fn resume_barrier(&self, barrier_id: &str) -> bool {
@@ -147,25 +201,10 @@ impl SharedState {
         None
     }
 
-    pub async fn should_drop_on_commit(&self, pid: Option<u32>) -> bool {
+    pub async fn cleanup_barrier(&self, barrier_id: &str) {
         let mut state = self.0.lock().await;
-        let mut should_drop = false;
-
-        state.rules.retain(|rule| {
-            if rule.action == BarrierAction::DropConnectionOnCommit {
-                if let Some(target_pid) = rule.target_pid {
-                    if Some(target_pid) == pid {
-                        should_drop = true;
-                        return false; // удаляем сработавшее одноразовое правило
-                    }
-                } else {
-                    should_drop = true;
-                    return false;
-                }
-            }
-            true
-        });
-
-        should_drop
+        if state.active_barriers.remove(barrier_id).is_some() {
+            warn!(barrier_id = %barrier_id, "Barrier automatically released due to timeout (TTL)");
+        }
     }
 }

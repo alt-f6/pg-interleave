@@ -1,12 +1,14 @@
 use bytes::BytesMut;
 use std::net::SocketAddr;
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 use crate::barrier::SharedState;
 use crate::protocol::{
-    decode_regular_message, decode_startup_message, extract_backend_key_data, extract_query_text,
+    PgMessage, decode_regular_message, decode_startup_message, extract_backend_key_data,
+    extract_simple_query, parse_extended_parse,
 };
 
 pub async fn run_proxy(
@@ -84,15 +86,45 @@ async fn handle_connection(
 
                     match msg {
                         Some(m) => {
-                            if let Some(sql) = extract_query_text(&m) {
+                            let mut query_opt = extract_simple_query(&m);
+
+                            // Handle Parse ('P') in Extended Query
+                            if let Some((stmt_name, sql)) = parse_extended_parse(&m) {
+                                state.store_statement(conn_id, stmt_name, sql.clone()).await;
+                                query_opt = Some(sql);
+                            }
+
+                            if let Some(ref sql) = query_opt {
                                 info!(conn_id, query = %sql, "-> Client query");
 
-                                if let Some((barrier_id, receiver)) = state.check_and_create_barrier(server_pid, &sql).await {
-                                    info!(conn_id, barrier_id = %barrier_id, "Waiting for resume command from controller...");
-                                    let _ = receiver.await;
+                                // 1. Check for Synthetic Deadlock injection (40P01)
+                                if state.check_deadlock_match(server_pid, sql).await {
+                                    warn!(conn_id, query = %sql, "CHAOS: Injecting synthetic 40P01 Deadlock error!");
+                                    let err_msg = PgMessage::build_error_response(
+                                        "40P01",
+                                        "deadlock detected (synthetic injection by pg-interleave)",
+                                    );
+                                    let ready_msg = PgMessage::build_ready_for_query_error();
+
+                                    client_write.write_all(&err_msg.to_bytes()).await?;
+                                    client_write.write_all(&ready_msg.to_bytes()).await?;
+                                    continue;
+                                }
+
+                                // 2. Check for pause barrier with 5-second TTL timeout
+                                if let Some((barrier_id, receiver)) = state.check_and_create_barrier(server_pid, sql).await {
+                                    info!(conn_id, barrier_id = %barrier_id, "Waiting for resume command from test (5s TTL)...");
+                                    let cleanup_state = state.clone();
+                                    let b_id = barrier_id.clone();
+
+                                    let wait_result = tokio::time::timeout(Duration::from_secs(5), receiver).await;
+                                    if wait_result.is_err() {
+                                        cleanup_state.cleanup_barrier(&b_id).await;
+                                    }
                                     info!(conn_id, barrier_id = %barrier_id, "Resuming packet forward to database");
                                 }
                             }
+
                             server_write.write_all(&m.to_bytes()).await?;
                         }
                         None => break,
@@ -121,14 +153,13 @@ async fn handle_connection(
                                 info!(conn_id, server_pid = pid, "Bound BackendKeyData");
                             }
 
-                            // Check: if server confirmed COMMIT and drop-on-commit rule is active
+                            // Check Torn Commit (force connection drop on COMMIT)
                             if m.tag == Some(b'C') {
                                 let payload_str = String::from_utf8_lossy(&m.payload);
                                 if payload_str.starts_with("COMMIT")
                                     && state.should_drop_on_commit(server_pid).await
                                 {
-                                    info!(conn_id, "CHAOS: Forcing TCP connection drop right after database COMMIT!");
-                                    // Terminate session immediately without sending CommandComplete to client
+                                    warn!(conn_id, "CHAOS: Forcing TCP connection drop right after database COMMIT!");
                                     return Ok(());
                                 }
                             }

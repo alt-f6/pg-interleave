@@ -43,7 +43,7 @@ export class BarrierHandle {
 }
 
 export class PgInterleaveClient {
-  constructor(private readonly controlUrl = "http://localhost:9090") {}
+  constructor(private readonly controlUrl = "http://127.0.0.1:9090") {}
 
   async reset(): Promise<void> {
     const res = await fetch(`${this.controlUrl}/reset`, { method: "POST" });
@@ -74,7 +74,7 @@ export class PgInterleaveClient {
       body: JSON.stringify({
         target_pid: pid ?? null,
         query_pattern: pattern,
-        action: options.action ?? "PauseBeforeQuery",
+        action: options.action ?? "pause_before_query",
       }),
     });
 
@@ -88,17 +88,51 @@ export class PgInterleaveClient {
   async injectTornCommit(client: Client): Promise<void> {
     const pid = await this.getPid(client);
     const res = await fetch(`${this.controlUrl}/intercept`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-            target_pid: pid,
-            query_pattern: "COMMIT",
-            action: "drop_connection_on_commit",
-        }),
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        target_pid: pid,
+        query_pattern: "COMMIT",
+        action: "drop_connection_on_commit",
+      }),
     });
 
     if (!res.ok) {
-        throw new Error(`Failed to inject torn commit: HTTP ${res.status}`);
+      throw new Error(`Failed to inject torn commit: HTTP ${res.status}`);
+    }
+  }
+
+  /**
+   * Injects a synthetic PostgreSQL 40P01 (Deadlock Detected) error frame
+   * when matching the given query pattern without locking real rows.
+   */
+  async injectDeadlock(options: {
+    client?: Client;
+    clientPid?: number;
+    onQueryMatch: string | RegExp;
+  }): Promise<void> {
+    let pid = options.clientPid;
+    if (!pid && options.client) {
+      pid = await this.getPid(options.client);
+    }
+
+    const pattern =
+      typeof options.onQueryMatch === "string"
+        ? options.onQueryMatch
+        : options.onQueryMatch.source;
+
+    const res = await fetch(`${this.controlUrl}/intercept`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        target_pid: pid ?? null,
+        query_pattern: pattern,
+        action: "synthetic_deadlock",
+      }),
+    });
+
+    if (!res.ok) {
+      throw new Error(`Failed to inject deadlock rule: HTTP ${res.status}`);
     }
   }
 }
