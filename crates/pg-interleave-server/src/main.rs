@@ -1,12 +1,16 @@
 use clap::Parser;
 use std::net::SocketAddr;
-use tracing::{info, Level};
+use tracing::{Level, info};
 use tracing_subscriber::FmtSubscriber;
 
+mod protocol;
 mod proxy;
 
 #[derive(Parser, Debug)]
-#[command(name = "pg-interleave", about = "Deterministic Postgres Proxy for integration tests")]
+#[command(
+    name = "pg-interleave",
+    about = "Deterministic Postgres Proxy for integration tests"
+)]
 struct Args {
     #[arg(long, default_value = "127.0.0.1:5433")]
     listen_addr: SocketAddr,
