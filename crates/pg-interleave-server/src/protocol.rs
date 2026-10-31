@@ -94,7 +94,7 @@ pub fn peek_startup_type(src: &BytesMut) -> Result<Option<SpecialStartup>> {
         return Ok(None);
     }
     let len = u32::from_be_bytes([src[0], src[1], src[2], src[3]]) as usize;
-    if len < 8 || len > MAX_MESSAGE_LEN {
+    if !(8..=MAX_MESSAGE_LEN).contains(&len) {
         bail!("Invalid startup packet length: {}", len);
     }
     if src.len() < len {
@@ -119,7 +119,7 @@ pub fn decode_startup_message(src: &mut BytesMut) -> Result<Option<PgMessage>> {
         return Ok(None);
     }
     let len = u32::from_be_bytes([src[0], src[1], src[2], src[3]]) as usize;
-    if len < 4 || len > MAX_MESSAGE_LEN {
+    if !(4..=MAX_MESSAGE_LEN).contains(&len) {
         bail!("Invalid startup packet length: {}", len);
     }
     if src.len() < len {
@@ -212,5 +212,120 @@ pub fn extract_simple_query(msg: &PgMessage) -> Option<String> {
         String::from_utf8(trimmed.to_vec()).ok()
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytes::BytesMut;
+    use proptest::prelude::*;
+
+    #[test]
+    fn test_decode_invalid_length_too_small() {
+        let mut buf = BytesMut::from(&[b'Q', 0, 0, 0, 3, b'X'][..]);
+        let res = decode_regular_message(&mut buf);
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_decode_invalid_length_too_large() {
+        let mut buf = BytesMut::from(&[b'Q', 0xFF, 0xFF, 0xFF, 0xFF, b'X'][..]);
+        let res = decode_regular_message(&mut buf);
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_decode_multiple_messages_in_one_buffer() {
+        let msg1 = PgMessage {
+            tag: Some(b'Q'),
+            payload: b"SELECT 1;\0".to_vec(),
+        };
+        let msg2 = PgMessage {
+            tag: Some(b'Q'),
+            payload: b"SELECT 2;\0".to_vec(),
+        };
+
+        let mut buf = BytesMut::new();
+        buf.extend_from_slice(&msg1.to_bytes());
+        buf.extend_from_slice(&msg2.to_bytes());
+
+        let decoded1 = decode_regular_message(&mut buf).unwrap().expect("msg1");
+        assert_eq!(decoded1.tag, Some(b'Q'));
+        assert_eq!(decoded1.payload, msg1.payload);
+
+        let decoded2 = decode_regular_message(&mut buf).unwrap().expect("msg2");
+        assert_eq!(decoded2.tag, Some(b'Q'));
+        assert_eq!(decoded2.payload, msg2.payload);
+
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn test_decode_byte_by_byte_stream() {
+        let original = PgMessage {
+            tag: Some(b'Q'),
+            payload: b"SELECT 'streaming test';\0".to_vec(),
+        };
+        let raw = original.to_bytes();
+
+        let mut buf = BytesMut::new();
+        let mut decoded = None;
+
+        for byte in raw {
+            buf.extend_from_slice(&[byte]);
+            if let Some(msg) = decode_regular_message(&mut buf).unwrap() {
+                decoded = Some(msg);
+                break;
+            }
+        }
+
+        let decoded = decoded.expect("message should be decoded once all bytes arrive");
+        assert_eq!(decoded.tag, original.tag);
+        assert_eq!(decoded.payload, original.payload);
+        assert!(buf.is_empty());
+    }
+
+    proptest! {
+        #[test]
+        fn test_decode_random_chunk_slicing(
+            payload in prop::collection::vec(any::<u8>(), 0..1024),
+            tag in any::<u8>(),
+            split_points in prop::collection::vec(1usize..1024, 1..10),
+        ) {
+            let original = PgMessage {
+                tag: Some(tag),
+                payload,
+            };
+            let raw = original.to_bytes();
+
+            let mut buf = BytesMut::new();
+            let mut cursor = 0;
+            let mut decoded_msg = None;
+
+            for split in split_points {
+                if cursor >= raw.len() {
+                    break;
+                }
+                let end = (cursor + split).min(raw.len());
+                buf.extend_from_slice(&raw[cursor..end]);
+                cursor = end;
+
+                if let Some(msg) = decode_regular_message(&mut buf).unwrap() {
+                    decoded_msg = Some(msg);
+                    break;
+                }
+            }
+
+            if cursor < raw.len() && decoded_msg.is_none() {
+                buf.extend_from_slice(&raw[cursor..]);
+                decoded_msg = decode_regular_message(&mut buf).unwrap();
+            }
+
+            let result = decoded_msg.expect("Valid packet must be completely decoded");
+            prop_assert_eq!(result.tag, original.tag);
+            prop_assert_eq!(result.payload, original.payload);
+            prop_assert!(buf.is_empty());
+        }
     }
 }

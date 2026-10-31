@@ -144,12 +144,11 @@ async fn handle_connection(
                                 conn_scope.portals.insert(portal_name, stmt_name);
                             }
 
-                            if let Some(portal_name) = parse_extended_execute(&m) {
-                                if let Some(stmt_name) = conn_scope.portals.get(&portal_name) {
-                                    if let Some(sql) = conn_scope.statements.get(stmt_name) {
-                                        query_opt = Some(sql.clone());
-                                    }
-                                }
+                            if let Some(portal_name) = parse_extended_execute(&m)
+                                && let Some(stmt_name) = conn_scope.portals.get(&portal_name)
+                                && let Some(sql) = conn_scope.statements.get(stmt_name)
+                            {
+                                query_opt = Some(sql.clone())
                             }
 
                             if m.tag == Some(b'C') && m.payload.len() >= 2 {

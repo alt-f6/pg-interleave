@@ -21,6 +21,6 @@ services:
       postgres:
         condition: service_healthy
     ports:
-      - "5433:5433"
-      - "9090:9090"
+      - "127.0.0.1:5433:5433"
+      - "127.0.0.1:9090:9090"
     command: ["--listen-addr", "0.0.0.0:5433", "--target-addr", "postgres:5432", "--control-addr", "0.0.0.0:9090"]

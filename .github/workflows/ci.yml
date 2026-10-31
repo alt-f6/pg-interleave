@@ -30,6 +30,8 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -39,17 +41,37 @@ jobs:
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
 
+      - name: Check Rust formatting
+        run: cargo fmt --check
+
+      - name: Clippy checks
+        run: cargo clippy -p pg-interleave-server -- -D warnings
+
+      - name: Run Rust unit tests
+        run: cargo test
+
       - name: Build pg-interleave proxy
         run: cargo build --release -p pg-interleave-server
 
       - name: Start pg-interleave proxy in background
         run: |
           ./target/release/pg-interleave-server --listen-addr 127.0.0.1:5433 --target-addr 127.0.0.1:5432 --control-addr 127.0.0.1:9090 &
-          sleep 2
+          for i in {1..30}; do
+            if curl -s http://127.0.0.1:9090/events > /dev/null; then
+              echo "pg-interleave proxy is ready"
+              break
+            fi
+            echo "Waiting for pg-interleave..."
+            sleep 0.2
+          done
 
       - name: Install SDK dependencies
         working-directory: packages/sdk-ts
         run: npm ci
+
+      - name: Typecheck SDK
+        working-directory: packages/sdk-ts
+        run: npx tsc --noEmit
 
       - name: Run Vitest Integration Tests
         working-directory: packages/sdk-ts
