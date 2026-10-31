@@ -1,6 +1,23 @@
 use anyhow::{Result, bail};
 use bytes::{Buf, BytesMut};
 
+pub const MAX_MESSAGE_LEN: usize = 16 * 1024 * 1024;
+
+#[allow(dead_code)]
+pub const PG_PROTOCOL_V3: u32 = 196608;
+pub const PG_CANCEL_CODE: u32 = 80877102;
+pub const PG_SSL_CODE: u32 = 80877103;
+pub const PG_GSSENC_CODE: u32 = 80877104;
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SpecialStartup {
+    SslRequest,
+    GssEncRequest,
+    CancelRequest { pid: u32, secret: u32 },
+    RegularStartup,
+}
+
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub enum MessageDirection {
@@ -34,29 +51,23 @@ impl PgMessage {
         buf
     }
 
-    /// Constructs an ErrorResponse ('E') binary packet per PostgreSQL v3.0 protocol
     pub fn build_error_response(sqlstate: &str, message: &str) -> Self {
         let mut payload = Vec::new();
 
-        // Field 'S' (Severity): ERROR
         payload.push(b'S');
         payload.extend_from_slice(b"ERROR\0");
 
-        // Field 'V' (Severity non-localized): ERROR
         payload.push(b'V');
         payload.extend_from_slice(b"ERROR\0");
 
-        // Field 'C' (SQLSTATE Code): e.g. 40P01
         payload.push(b'C');
         payload.extend_from_slice(sqlstate.as_bytes());
         payload.push(0);
 
-        // Field 'M' (Message)
         payload.push(b'M');
         payload.extend_from_slice(message.as_bytes());
         payload.push(0);
 
-        // Terminating null byte for fields list
         payload.push(0);
 
         Self {
@@ -65,12 +76,41 @@ impl PgMessage {
         }
     }
 
-    /// Constructs a ReadyForQuery ('Z') packet in transaction error state ('E')
-    pub fn build_ready_for_query_error() -> Self {
+    pub fn build_ready_for_query(state: u8) -> Self {
         Self {
             tag: Some(b'Z'),
-            payload: vec![b'E'], // 'I' - idle, 'T' - in transaction, 'E' - in failed transaction
+            payload: vec![state],
         }
+    }
+
+    #[allow(dead_code)]
+    pub fn build_ready_for_query_error() -> Self {
+        Self::build_ready_for_query(b'E')
+    }
+}
+
+pub fn peek_startup_type(src: &BytesMut) -> Result<Option<SpecialStartup>> {
+    if src.len() < 8 {
+        return Ok(None);
+    }
+    let len = u32::from_be_bytes([src[0], src[1], src[2], src[3]]) as usize;
+    if len < 8 || len > MAX_MESSAGE_LEN {
+        bail!("Invalid startup packet length: {}", len);
+    }
+    if src.len() < len {
+        return Ok(None);
+    }
+
+    let code = u32::from_be_bytes([src[4], src[5], src[6], src[7]]);
+    match code {
+        PG_SSL_CODE if len == 8 => Ok(Some(SpecialStartup::SslRequest)),
+        PG_GSSENC_CODE if len == 8 => Ok(Some(SpecialStartup::GssEncRequest)),
+        PG_CANCEL_CODE if len == 16 => {
+            let pid = u32::from_be_bytes([src[8], src[9], src[10], src[11]]);
+            let secret = u32::from_be_bytes([src[12], src[13], src[14], src[15]]);
+            Ok(Some(SpecialStartup::CancelRequest { pid, secret }))
+        }
+        _ => Ok(Some(SpecialStartup::RegularStartup)),
     }
 }
 
@@ -79,6 +119,9 @@ pub fn decode_startup_message(src: &mut BytesMut) -> Result<Option<PgMessage>> {
         return Ok(None);
     }
     let len = u32::from_be_bytes([src[0], src[1], src[2], src[3]]) as usize;
+    if len < 4 || len > MAX_MESSAGE_LEN {
+        bail!("Invalid startup packet length: {}", len);
+    }
     if src.len() < len {
         return Ok(None);
     }
@@ -94,8 +137,12 @@ pub fn decode_regular_message(src: &mut BytesMut) -> Result<Option<PgMessage>> {
     let tag = src[0];
     let len = u32::from_be_bytes([src[1], src[2], src[3], src[4]]) as usize;
 
-    if len < 4 {
-        bail!("Invalid Postgres packet length: {}", len);
+    if !(4..=MAX_MESSAGE_LEN).contains(&len) {
+        bail!(
+            "Invalid Postgres packet length: {} (expected 4..={})",
+            len,
+            MAX_MESSAGE_LEN
+        );
     }
     if src.len() < 1 + len {
         return Ok(None);
@@ -129,7 +176,6 @@ pub fn extract_backend_key_data(msg: &PgMessage) -> Option<(u32, u32)> {
     }
 }
 
-/// Extracts statement name and query string from 'P' (Parse) packet
 pub fn parse_extended_parse(msg: &PgMessage) -> Option<(String, String)> {
     if msg.tag != Some(b'P') {
         return None;
@@ -141,7 +187,25 @@ pub fn parse_extended_parse(msg: &PgMessage) -> Option<(String, String)> {
     Some((stmt_name, query))
 }
 
-/// Extracts SQL text from simple query packet 'Q'
+pub fn parse_extended_bind(msg: &PgMessage) -> Option<(String, String)> {
+    if msg.tag != Some(b'B') {
+        return None;
+    }
+    let mut parts = msg.payload.split(|&b| b == 0);
+    let portal_name = String::from_utf8(parts.next()?.to_vec()).ok()?;
+    let stmt_name = String::from_utf8(parts.next()?.to_vec()).ok()?;
+    Some((portal_name, stmt_name))
+}
+
+pub fn parse_extended_execute(msg: &PgMessage) -> Option<String> {
+    if msg.tag != Some(b'E') {
+        return None;
+    }
+    let mut parts = msg.payload.split(|&b| b == 0);
+    let portal_name = String::from_utf8(parts.next()?.to_vec()).ok()?;
+    Some(portal_name)
+}
+
 pub fn extract_simple_query(msg: &PgMessage) -> Option<String> {
     if msg.tag == Some(b'Q') {
         let trimmed = msg.payload.strip_suffix(&[0]).unwrap_or(&msg.payload);

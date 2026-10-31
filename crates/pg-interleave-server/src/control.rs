@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use tracing::info;
 
-use crate::barrier::{InterceptRule, SharedState};
+use crate::barrier::{InterceptRule, InterceptRuleInput, SharedState};
 
 #[derive(Serialize)]
 struct StatusResponse {
@@ -22,11 +22,17 @@ struct ResumeResponse {
     barrier_id: Option<String>,
 }
 
+#[derive(Serialize)]
+struct EventsResponse {
+    had_timeouts: bool,
+}
+
 #[derive(Deserialize)]
-struct InterceptRequest {
+struct RawInterceptRequest {
     target_pid: Option<u32>,
     query_pattern: String,
     action: Option<crate::barrier::BarrierAction>,
+    times: Option<u32>,
 }
 
 pub async fn run_control_server(addr: SocketAddr, state: SharedState) -> anyhow::Result<()> {
@@ -37,6 +43,7 @@ pub async fn run_control_server(addr: SocketAddr, state: SharedState) -> anyhow:
             "/barriers",
             get(list_barriers_handler).post(list_barriers_handler),
         )
+        .route("/events", get(events_handler))
         .route("/resume/:barrier_id", post(resume_handler))
         .route("/resume-next", post(resume_next_handler))
         .with_state(state);
@@ -49,33 +56,47 @@ pub async fn run_control_server(addr: SocketAddr, state: SharedState) -> anyhow:
 
 async fn reset_handler(State(state): State<SharedState>) -> impl IntoResponse {
     state.reset().await;
-    Json(StatusResponse { status: "ok" })
+    (StatusCode::OK, Json(StatusResponse { status: "ok" }))
 }
 
 async fn intercept_handler(
     State(state): State<SharedState>,
-    Json(payload): Json<InterceptRequest>,
+    Json(payload): Json<RawInterceptRequest>,
 ) -> impl IntoResponse {
     let action = payload
         .action
         .unwrap_or(crate::barrier::BarrierAction::PauseBeforeQuery);
-    state
-        .add_rule(InterceptRule {
-            target_pid: payload.target_pid,
-            query_pattern: payload.query_pattern,
-            action,
-        })
-        .await;
 
-    Json(StatusResponse {
-        status: "rule_added",
-    })
+    let input = InterceptRuleInput {
+        target_pid: payload.target_pid,
+        query_pattern: payload.query_pattern,
+        action,
+        times: payload.times.or(Some(1)),
+    };
+
+    match InterceptRule::try_from(input) {
+        Ok(rule) => {
+            state.add_rule(rule).await;
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({ "status": "rule_added" })),
+            )
+        }
+        Err(err) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": err.to_string() })),
+        ),
+    }
 }
 
 async fn list_barriers_handler(State(state): State<SharedState>) -> impl IntoResponse {
-    let st = state.0.lock().await;
-    let list: Vec<String> = st.active_barriers.keys().cloned().collect();
+    let list = state.active_barrier_ids().await;
     Json(list)
+}
+
+async fn events_handler(State(state): State<SharedState>) -> impl IntoResponse {
+    let had_timeouts = state.has_timeouts().await;
+    Json(EventsResponse { had_timeouts })
 }
 
 async fn resume_handler(
