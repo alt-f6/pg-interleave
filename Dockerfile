@@ -1,9 +1,9 @@
 # Стейдж сборки бинарника
-FROM rust:1.88-alpine AS builder
+FROM rust:alpine AS builder
 RUN apk add --no-cache musl-dev
 
 WORKDIR /app
-COPY Cargo.toml Cargo.lock ./
+COPY Cargo.toml ./
 COPY crates/ crates/
 
 RUN cargo build --release -p pg-interleave-server
