@@ -17,13 +17,13 @@ describe("Transaction Retry Pitfalls: p-retry + PostgreSQL", () => {
     await observer.connect();
 
     await observer.query(`
-      CREATE TABLE IF NOT EXISTS billing_orders (
+      DROP TABLE IF EXISTS billing_orders;
+      CREATE TABLE billing_orders (
         id SERIAL PRIMARY KEY,
         account_id INT NOT NULL,
         amount INT NOT NULL,
         idempotency_key TEXT UNIQUE
       );
-      TRUNCATE billing_orders;
     `);
   });
 
