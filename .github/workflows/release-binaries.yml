@@ -12,19 +12,23 @@ jobs:
     permissions:
       contents: write
     strategy:
+      fail-fast: false
       matrix:
         include:
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
-            artifact_name: pg-interleave
+            bin_source: target/x86_64-unknown-linux-musl/release/pg-interleave-server
+            bin_dest: pg-interleave
             asset_name: pg-interleave-linux-x86_64.tar.gz
           - target: aarch64-apple-darwin
             os: macos-latest
-            artifact_name: pg-interleave
+            bin_source: target/aarch64-apple-darwin/release/pg-interleave-server
+            bin_dest: pg-interleave
             asset_name: pg-interleave-macos-aarch64.tar.gz
           - target: x86_64-pc-windows-msvc
             os: windows-latest
-            artifact_name: pg-interleave.exe
+            bin_source: target/x86_64-pc-windows-msvc/release/pg-interleave-server.exe
+            bin_dest: pg-interleave.exe
             asset_name: pg-interleave-windows-x86_64.zip
 
     steps:
@@ -40,17 +44,22 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y musl-tools
 
       - name: Build binary
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
         run: cargo build --release --target ${{ matrix.target }} -p pg-interleave-server
 
       - name: Package Binary (Unix)
         if: matrix.os != 'windows-latest'
         run: |
-          tar -czvf ${{ matrix.asset_name }} -C target/${{ matrix.target }}/release/ ${{ matrix.artifact_name }}
+          cp ${{ matrix.bin_source }} ./${{ matrix.bin_dest }}
+          chmod +x ./${{ matrix.bin_dest }}
+          tar -czvf ${{ matrix.asset_name }} ./${{ matrix.bin_dest }}
 
       - name: Package Binary (Windows)
         if: matrix.os == 'windows-latest'
         run: |
-          Compress-Archive -Path target/${{ matrix.target }}/release/${{ matrix.artifact_name }} -DestinationPath ${{ matrix.asset_name }}
+          Copy-Item ${{ matrix.bin_source }} -Destination ./${{ matrix.bin_dest }}
+          Compress-Archive -Path ./${{ matrix.bin_dest }} -DestinationPath ${{ matrix.asset_name }}
 
       - name: Upload Release Asset
         uses: softprops/action-gh-release@v2
