@@ -1,10 +1,13 @@
 # pg-interleave
 
+[![CI](https://github.com/alt-f6/pg-interleave/actions/workflows/ci.yml/badge.svg)](https://github.com/alt-f6/pg-interleave/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 A PostgreSQL wire-protocol proxy for **deterministic concurrency tests**.
 
 It sits between your test code and Postgres, understands the v3.0 protocol, and lets a test pause a specific statement, hold its response, tear the connection after a commit, or inject a `40P01` deadlock error, all on command and in a fixed order.
 
-> **Status: alpha.** Small, tested on PostgreSQL 16, Rust server + TypeScript SDK. APIs may change. Plaintext connections only.
+> **Status: alpha.** Rust server + TypeScript SDK, tested on PostgreSQL 16. APIs may change. Plaintext connections only.
 
 ```
 test code ──HTTP :9090──▶ control plane ─┐
@@ -20,6 +23,94 @@ pg-interleave is for the case where you **don't**: a function in your applicatio
 
 If your scenario can be written as plain sequential `await`s on two clients, you don't need this tool. PostgreSQL's own `isolationtester` is also worth knowing: it explores permutations of steps across sessions and lives inside the Postgres source tree.
 
+## Install
+
+> Docker image, release binaries and the npm package are published with the **v0.1.0** release. Until that tag exists, use [From source](#from-source).
+
+### 1. Run the proxy
+
+Docker (pass all three flags: `docker run` arguments replace the image defaults):
+
+```bash
+docker run -d --name pg-interleave \
+  --add-host=host.docker.internal:host-gateway \
+  -p 127.0.0.1:5433:5433 -p 127.0.0.1:9090:9090 \
+  ghcr.io/alt-f6/pg-interleave:latest \
+  --listen-addr 0.0.0.0:5433 \
+  --control-addr 0.0.0.0:9090 \
+  --target-addr host.docker.internal:5432
+```
+
+Or download a standalone binary for Linux, macOS or Windows from [Releases](https://github.com/alt-f6/pg-interleave/releases).
+
+### 2. Install the SDK
+
+```bash
+npm install -D pg-interleave
+```
+
+### From source
+
+You need a running PostgreSQL, Rust 1.88+ (edition 2024, the code uses let-chains) and Node 20+.
+
+```bash
+# start the proxy
+cargo run --release -p pg-interleave-server -- \
+  --listen-addr 127.0.0.1:5433 \
+  --target-addr 127.0.0.1:5432 \
+  --control-addr 127.0.0.1:9090
+
+# run the SDK tests
+cd packages/sdk-ts
+npm ci
+npm test
+```
+
+Point your client at port **5433** instead of 5432. The control plane is on 9090. Defaults: listen `127.0.0.1:5433`, target `127.0.0.1:5432`, control `127.0.0.1:9090`, barrier TTL 5000 ms (`--barrier-ttl-ms`).
+
+## 10-second example
+
+Freeze an `UPDATE` inside the proxy, look at the table from another connection, then let it through.
+
+```ts
+import { Client } from "pg";
+import { PgInterleaveClient } from "pg-interleave";
+
+const chaos = new PgInterleaveClient("http://127.0.0.1:9090");
+const url = "postgres://postgres:postgres@127.0.0.1:5433/postgres";
+await chaos.reset();
+
+const observer = new Client({ connectionString: url });
+const a = new Client({ connectionString: url });
+await observer.connect();
+await a.connect();
+
+await observer.query(
+  "CREATE TABLE IF NOT EXISTS accounts (id int PRIMARY KEY, balance int NOT NULL)",
+);
+await observer.query(
+  "INSERT INTO accounts VALUES (1, 100) ON CONFLICT (id) DO UPDATE SET balance = 100",
+);
+
+// Arm a barrier for connection `a`
+const barrier = await chaos.intercept({
+  client: a,
+  onQueryMatch: /UPDATE accounts/,
+});
+
+const update = a.query(
+  "UPDATE accounts SET balance = balance - 50 WHERE id = 1",
+);
+await barrier.wait(); // the statement is held in the proxy; Postgres has not seen it
+
+console.log((await observer.query("SELECT balance FROM accounts")).rows[0]); // { balance: 100 }
+
+await barrier.resume(); // let it through
+await update;
+
+console.log((await observer.query("SELECT balance FROM accounts")).rows[0]); // { balance: 50 }
+```
+
 ## What it can do
 
 | Action                      | What happens                                                                                                                                |
@@ -34,47 +125,15 @@ Behavior you can rely on (each is covered by a test):
 - **FIFO release.** `resume-next` releases pending barriers in creation order.
 - **One-shot by default.** A rule fires once (`times: 1`). Pass `times` to change it.
 - **Bad patterns fail loudly.** An invalid regex is rejected with HTTP 400 at registration.
-- **Timeouts are errors, not silence.** If a barrier is not released within the TTL (default 5000 ms, `--barrier-ttl-ms`), the client receives SQLSTATE `57014` and `GET /events` reports `had_timeouts: true`, so a test can fail on it.
+- **Timeouts are errors, not silence.** If a barrier is not released within the TTL, the client receives SQLSTATE `57014` and `GET /events` reports `had_timeouts: true`, so a test can fail on it.
 - **Per-connection targeting.** Rules can be scoped to a backend PID (the SDK reads it with `pg_backend_pid()`).
-
-## Quickstart (from source)
-
-You need a running PostgreSQL, Rust 1.88+ (edition 2024, the code uses let-chains) and Node 20+.
-
-```bash
-# 1. start the proxy
-cargo run --release -p pg-interleave-server -- \
-  --listen-addr 127.0.0.1:5433 \
-  --target-addr 127.0.0.1:5432 \
-  --control-addr 127.0.0.1:9090
-
-# 2. run the SDK tests
-cd packages/sdk-ts
-npm ci
-npm test
-```
-
-Point your client at port **5433** instead of 5432. The control plane is on 9090.
-
-Defaults: listen `127.0.0.1:5433`, target `127.0.0.1:5432`, control `127.0.0.1:9090`, barrier TTL 5000 ms.
+- **Extended protocol.** Prepared statements are matched when they are executed, including repeated executions, and a synthetic deadlock leaves the stream clean for the next query (checked with both `node-postgres` and `libpq`).
 
 ## Example: a real lost update
 
 Transaction A reads a balance, then writes a value computed from it. We freeze A just before its `UPDATE`, let B complete a whole transaction, then release A.
 
 ```ts
-import { Client } from "pg";
-import { PgInterleaveClient } from "pg-interleave";
-
-const chaos = new PgInterleaveClient("http://127.0.0.1:9090");
-const url = "postgres://postgres:postgres@127.0.0.1:5433/postgres";
-
-await chaos.reset();
-const a = new Client({ connectionString: url });
-const b = new Client({ connectionString: url });
-await a.connect();
-await b.connect();
-
 const barrier = await chaos.intercept({
   client: a,
   onQueryMatch: /UPDATE bank_accounts SET balance = 80/,
@@ -105,7 +164,13 @@ await txA;
 // final balance is 80, not 70: B's update was lost
 ```
 
-The same scenario with `SELECT ... FOR UPDATE` makes B block on A's row lock, and the final balance is 70. Both versions are in `packages/sdk-ts/src/lost-update.test.ts`.
+The same scenario with `SELECT ... FOR UPDATE` makes B block on A's row lock, and the final balance is 70. Both versions are in [`packages/sdk-ts/src/lost-update.test.ts`](packages/sdk-ts/src/lost-update.test.ts).
+
+## Example: a retry loop that double-charges
+
+[`examples/retry-anomaly`](examples/retry-anomaly) shows a common mistake rather than a bug in any library. A function inserts a payment inside a transaction and is wrapped in a generic retry helper (`p-retry` here). pg-interleave drops the connection **after** Postgres committed but **before** the client saw the result. The helper sees a network error, retries, and the order is inserted a second time: `billing_orders` ends up with two rows ($100 charged instead of $50).
+
+The retry was not wrong to fire; the transaction was not safe to repeat. The usual fix is an idempotency key with a unique constraint (`INSERT ... ON CONFLICT (idempotency_key) DO NOTHING`). This is the kind of failure that is almost impossible to reproduce with mocks, because the commit really happened on the server.
 
 ## SDK
 
@@ -146,6 +211,7 @@ The control plane has **no authentication**. Keep it on `127.0.0.1`.
 - **No TLS.** The proxy answers `N` to `SSLRequest` and `GSSENCRequest`, so clients must connect in plaintext (`sslmode=disable`).
 - **Regex on SQL text.** Rules match the statement text with a regular expression, not a parsed AST. Anchor your patterns.
 - **One shared proxy.** State is global. Run test files serially (`vitest --fileParallelism=false`) or call `reset()` between them.
+- **Connection pools.** Without `target_pid`, a rule matches any connection. To control one specific connection, check a client out of the pool and target its PID. Routing by SQL comment is planned, not implemented.
 - **Only tested with `node-postgres` and `psql`.** Other drivers may exercise paths that have no test yet.
 
 ## Development
