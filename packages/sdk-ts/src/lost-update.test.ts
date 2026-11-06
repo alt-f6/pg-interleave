@@ -83,6 +83,8 @@ describe("Concurrency Anomaly: Lost Update vs FOR UPDATE", () => {
     })();
     await barrierA.wait();
 
+    const pidB = await chaos.getPid(clientB);
+
     let txBFinished = false;
     const txBPromise = (async () => {
       await clientB.query("BEGIN");
@@ -96,7 +98,27 @@ describe("Concurrency Anomaly: Lost Update vs FOR UPDATE", () => {
       txBFinished = true;
     })();
 
-    await new Promise((r) => setTimeout(r, 150));
+    let isWaitingForLock = false;
+    const observer = new Client({
+      connectionString: "postgres://postgres:postgres@127.0.0.1:5433/postgres",
+    });
+    await observer.connect();
+
+    const startWait = Date.now();
+    while (Date.now() - startWait < 5000) {
+      const lockCheck = await observer.query<{ wait_event_type: string | null }>(
+        "SELECT wait_event_type FROM pg_stat_activity WHERE pid = $1",
+        [pidB]
+      );
+      if (lockCheck.rows[0]?.wait_event_type === "Lock") {
+        isWaitingForLock = true;
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    await observer.end();
+
+    expect(isWaitingForLock).toBe(true);
     expect(txBFinished).toBe(false);
 
     await barrierA.resume();

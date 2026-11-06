@@ -298,22 +298,18 @@ impl SharedState {
         (barrier_id, rx)
     }
 
-    pub async fn should_drop_on_commit(&self, pid: Option<u32>) -> bool {
+    pub async fn should_drop_on_commit(&self, pid: Option<u32>, commit_tag: &str) -> bool {
         let mut state = self.inner.lock().await;
         let mut should_drop = false;
 
         state.rules.retain_mut(|rule| {
             if rule.action == BarrierAction::DropConnectionOnCommit {
-                if let Some(target_pid) = rule.target_pid {
-                    if Some(target_pid) == pid {
-                        should_drop = true;
-                        if let Some(ref mut count) = rule.times {
-                            *count = count.saturating_sub(1);
-                            return *count > 0;
-                        }
-                        return false;
-                    }
-                } else {
+                if let Some(target_pid) = rule.target_pid
+                    && Some(target_pid) != pid
+                {
+                    return true;
+                }
+                if rule.compiled_regex.is_match(commit_tag) {
                     should_drop = true;
                     if let Some(ref mut count) = rule.times {
                         *count = count.saturating_sub(1);
@@ -384,5 +380,13 @@ impl SharedState {
             .keys()
             .map(|id| format!("barrier_{}", id))
             .collect()
+    }
+
+    pub async fn cleanup_connection(&self, conn_id: u64, pid: Option<u32>) {
+        let mut st = self.inner.lock().await;
+        st.client_statements.remove(&conn_id);
+        if let Some(p) = pid {
+            st.pid_to_conn.remove(&p);
+        }
     }
 }

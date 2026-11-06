@@ -15,7 +15,7 @@ describe("Protocol & Barrier Guarantees", () => {
   });
 
   afterEach(async () => {
-    await client.end().catch(() => {});
+    await client?.end().catch(() => {});
   });
 
   it("rejects invalid regex pattern with HTTP 400", async () => {
@@ -27,15 +27,19 @@ describe("Protocol & Barrier Guarantees", () => {
     ).rejects.toThrow(/HTTP 400/);
   });
 
-  it("verifies PauseAfterResponse holds data before releasing to client", async () => {
+  it("verifies PauseAfterResponse with parameterized query holds data until release", async () => {
     const barrier = await chaos.intercept({
       client,
-      onQueryMatch: /SELECT 777/,
+      onQueryMatch: /SELECT \$1::int as val/,
       action: "pause_after_response",
     });
 
     let clientReceived = false;
-    const queryPromise = client.query("SELECT 777 as val").then((res) => {
+    const queryPromise = client.query({
+      name: "fetch_param",
+      text: "SELECT $1::int as val",
+      values: [999],
+    }).then((res) => {
       clientReceived = true;
       return res;
     });
@@ -46,18 +50,22 @@ describe("Protocol & Barrier Guarantees", () => {
     await barrier.resume();
     const res = await queryPromise;
     expect(clientReceived).toBe(true);
-    expect(res.rows[0].val).toBe(777);
+    expect(res.rows[0].val).toBe(999);
   });
 
-  it("aborts query with SQLSTATE 57014 when barrier TTL expires", async () => {
+  it("aborts extended protocol query with SQLSTATE 57014 when barrier TTL expires", async () => {
     await chaos.intercept({
       client,
-      onQueryMatch: /SELECT 888/,
+      onQueryMatch: /SELECT \$1::int as timeout_val/,
     });
 
     let errorCode = "";
     try {
-      await client.query("SELECT 888");
+      await client.query({
+        name: "test_timeout_stmt",
+        text: "SELECT $1::int as timeout_val",
+        values: [888],
+      });
     } catch (err: any) {
       errorCode = err.code;
     }
@@ -66,18 +74,36 @@ describe("Protocol & Barrier Guarantees", () => {
     expect(await chaos.hasTimeouts()).toBe(true);
   }, 10000);
 
-  it("supports prepared statement re-execution across multiple cycles", async () => {
-    const q = {
-      name: "get_square",
-      text: "SELECT ($1::int * $1::int) as sq",
-      values: [4],
+  it("pauses prepared statement only on second execution cycle", async () => {
+    const queryConfig = {
+      name: "re_exec_stmt",
+      text: "SELECT ($1::int * 2) as doubled",
+      values: [5],
     };
 
-    const first = await client.query(q);
-    expect(first.rows[0].sq).toBe(16);
+    // Первая итерация выполняется свободно
+    const firstRes = await client.query(queryConfig);
+    expect(firstRes.rows[0].doubled).toBe(10);
 
-    q.values = [5];
-    const second = await client.query(q);
-    expect(second.rows[0].sq).toBe(25);
+    // Ставим перехватчик перед вторым вызовом
+    const barrier = await chaos.intercept({
+      client,
+      onQueryMatch: /SELECT \(\$1::int \* 2\) as doubled/,
+    });
+
+    queryConfig.values = [10];
+    let secondFinished = false;
+    const secondPromise = client.query(queryConfig).then((r) => {
+      secondFinished = true;
+      return r;
+    });
+
+    await barrier.wait();
+    expect(secondFinished).toBe(false);
+
+    await barrier.resume();
+    const secondRes = await secondPromise;
+    expect(secondFinished).toBe(true);
+    expect(secondRes.rows[0].doubled).toBe(20);
   });
 });

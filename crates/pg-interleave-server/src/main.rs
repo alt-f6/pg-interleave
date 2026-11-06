@@ -18,12 +18,12 @@ struct Args {
     listen_addr: SocketAddr,
 
     #[arg(long, default_value = "127.0.0.1:5432")]
-    target_addr: SocketAddr,
+    target_addr: String,
 
     #[arg(long, default_value = "127.0.0.1:9090")]
     control_addr: SocketAddr,
 
-    #[arg(long, default_value_t = 5000)]
+    #[arg(long, default_value = "5000")]
     barrier_ttl_ms: u64,
 }
 
@@ -39,14 +39,9 @@ async fn main() -> anyhow::Result<()> {
 
     let proxy_handle = {
         let state = state.clone();
+        let target = args.target_addr.clone();
         tokio::spawn(async move {
-            proxy::run_proxy(
-                args.listen_addr,
-                args.target_addr,
-                state,
-                args.barrier_ttl_ms,
-            )
-            .await
+            proxy::run_proxy(args.listen_addr, target, state, args.barrier_ttl_ms).await
         })
     };
 
@@ -59,6 +54,7 @@ async fn main() -> anyhow::Result<()> {
         "pg-interleave started. Proxy: {}, Control: {}, TTL: {}ms",
         args.listen_addr, args.control_addr, args.barrier_ttl_ms
     );
+
     let (proxy_res, control_res) = tokio::try_join!(proxy_handle, control_handle)?;
     proxy_res?;
     control_res?;
