@@ -56,7 +56,7 @@ npm test
 
 Point your client at port **5433** instead of 5432. The control plane is on 9090.
 
-Defaults: listen `127.0.0.1:5433`, target `127.0.0.1:5432`, control `127.0.0.1:9090`, barrier TTL 5000 ms. `--target-addr` takes an IP and port, not a hostname.
+Defaults: listen `127.0.0.1:5433`, target `127.0.0.1:5432`, control `127.0.0.1:9090`, barrier TTL 5000 ms.
 
 ## Example: a real lost update
 
@@ -147,7 +147,6 @@ The control plane has **no authentication**. Keep it on `127.0.0.1`.
 - **Regex on SQL text.** Rules match the statement text with a regular expression, not a parsed AST. Anchor your patterns.
 - **One shared proxy.** State is global. Run test files serially (`vitest --fileParallelism=false`) or call `reset()` between them.
 - **Only tested with `node-postgres` and `psql`.** Other drivers may exercise paths that have no test yet.
-- **Docker.** The included `docker-compose.yml` passes `--target-addr postgres:5432`, which the CLI cannot parse (it needs an IP). Use the from-source quickstart until that is fixed.
 
 ## Development
 
