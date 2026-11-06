@@ -26,8 +26,8 @@ describe("Chaos Engige: Network Failures", () => {
     });
 
     afterEach(async () => {
-        try { await client.end(); } catch {}
-        await observer.end();
+        await client?.end().catch(() => {});
+        await observer?.end().catch(() => {});
     });
 
     it("reproduces torn commit: client throws connection error but data is persisted", async () => {

@@ -27,8 +27,8 @@ describe("Deterministic Transaction Race Conditions", () => {
   });
 
   afterEach(async () => {
-    await clientA.end();
-    await clientB.end();
+    await clientA?.end().catch(() => {});
+    await clientB?.end().catch(() => {});
   });
 
   it("deterministically pauses tx1 at balance update to allow tx2 race", async () => {
