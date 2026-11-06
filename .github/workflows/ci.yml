@@ -77,10 +77,24 @@ jobs:
         working-directory: packages/sdk-ts
         run: npm test
 
-      - name: Verify libpq / psql extended query pipeline
+      - name: Verify libpq / psql extended pipeline with deadlock recovery
         run: |
-          PGPASSWORD=postgres psql -h 127.0.0.1 -p 5433 -U postgres -d postgres -c "CREATE TABLE IF NOT EXISTS psql_pipe (id int);"
-          PGPASSWORD=postgres psql -h 127.0.0.1 -p 5433 -U postgres -d postgres << 'EOF'
-          \bind 1 \bind 2 \bind 3
-          SELECT $1;
+          curl -s -X POST http://127.0.0.1:9090/reset
+
+          curl -s -X POST http://127.0.0.1:9090/intercept \
+            -H "Content-Type: application/json" \
+            -d '{"query_pattern": "SELECT \\$1::int", "action": "synthetic_deadlock", "times": 1}'
+
+          OUTPUT=$(PGPASSWORD=postgres psql -h 127.0.0.1 -p 5433 -U postgres -d postgres -v ON_ERROR_STOP=0 << 'EOF'
+          \bind 1 \g
+          \bind 2 \g
+          \bind 3 \g
           EOF
+          2>&1)
+
+          echo "$OUTPUT"
+
+          echo "$OUTPUT" | grep -q "40P01" || { echo "Missing 40P01 deadlock error"; exit 1; }
+          echo "$OUTPUT" | grep -A 2 -F "?column?" | grep -q "2" || { echo "Query 2 failed to execute correctly"; exit 1; }
+          echo "$OUTPUT" | grep -A 2 -F "?column?" | grep -q "3" || { echo "Query 3 failed to execute correctly"; exit 1; }
+          echo "psql pipeline test passed!"

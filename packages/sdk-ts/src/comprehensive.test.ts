@@ -28,6 +28,7 @@ describe("Protocol & Barrier Guarantees", () => {
   });
 
   it("verifies PauseAfterResponse with parameterized query holds data until release", async () => {
+    // Параметризованный запрос ($1), проходящий через Parse -> Bind -> Execute
     const barrier = await chaos.intercept({
       client,
       onQueryMatch: /SELECT \$1::int as val/,
@@ -36,7 +37,7 @@ describe("Protocol & Barrier Guarantees", () => {
 
     let clientReceived = false;
     const queryPromise = client.query({
-      name: "fetch_param",
+      name: "fetch_param_stmt",
       text: "SELECT $1::int as val",
       values: [999],
     }).then((res) => {
@@ -44,9 +45,11 @@ describe("Protocol & Barrier Guarantees", () => {
       return res;
     });
 
+    // Ждем, пока база выполнит запрос, а прокси удержит ReadyForQuery
     await barrier.wait();
     expect(clientReceived).toBe(false);
 
+    // Отпускаем барьер
     await barrier.resume();
     const res = await queryPromise;
     expect(clientReceived).toBe(true);
@@ -74,18 +77,18 @@ describe("Protocol & Barrier Guarantees", () => {
     expect(await chaos.hasTimeouts()).toBe(true);
   }, 10000);
 
-  it("pauses prepared statement only on second execution cycle", async () => {
+  it("pauses prepared statement on re-execution cycle", async () => {
     const queryConfig = {
       name: "re_exec_stmt",
       text: "SELECT ($1::int * 2) as doubled",
       values: [5],
     };
 
-    // Первая итерация выполняется свободно
+    // 1-й цикл: выполняется без правил, стейтмент компилируется в Postgres
     const firstRes = await client.query(queryConfig);
     expect(firstRes.rows[0].doubled).toBe(10);
 
-    // Ставим перехватчик перед вторым вызовом
+    // Устанавливаем барьер строго перед 2-м циклом
     const barrier = await chaos.intercept({
       client,
       onQueryMatch: /SELECT \(\$1::int \* 2\) as doubled/,
@@ -98,9 +101,11 @@ describe("Protocol & Barrier Guarantees", () => {
       return r;
     });
 
+    // Убеждаемся, что стейтмент заморожен на этапе Execute
     await barrier.wait();
     expect(secondFinished).toBe(false);
 
+    // Снимаем барьер
     await barrier.resume();
     const secondRes = await secondPromise;
     expect(secondFinished).toBe(true);
