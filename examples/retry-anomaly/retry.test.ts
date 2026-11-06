@@ -20,7 +20,8 @@ describe("Transaction Retry Pitfalls: p-retry + PostgreSQL", () => {
       CREATE TABLE IF NOT EXISTS billing_orders (
         id SERIAL PRIMARY KEY,
         account_id INT NOT NULL,
-        amount INT NOT NULL
+        amount INT NOT NULL,
+        idempotency_key TEXT UNIQUE
       );
       TRUNCATE billing_orders;
     `);
@@ -33,15 +34,12 @@ describe("Transaction Retry Pitfalls: p-retry + PostgreSQL", () => {
   it("reproduces silent double-charge: p-retry duplicates non-idempotent transaction on torn commit", async () => {
     let attempt = 0;
 
-    // Бизнес-логика создания заказа на списание $50
     const createOrderTransaction = async () => {
       attempt++;
       const client = new Client({ connectionString: PROXY_URL });
-      // Подавляем неперехваченный emit('error') при внезапном разрыве сокета со стороны прокси
       client.on("error", () => {});
       await client.connect();
 
-      // Инжектируем разрыв соединения строго на первой попытке
       if (attempt === 1) {
         await chaos.injectTornCommit(client, 1);
       }
@@ -55,24 +53,64 @@ describe("Transaction Retry Pitfalls: p-retry + PostgreSQL", () => {
       }
     };
 
-    // p-retry ловит сетевой сбой на 1-й попытке и повторяет операцию
     await pRetry(createOrderTransaction, {
       retries: 2,
       minTimeout: 50,
       factor: 1,
     });
 
-    // Убеждаемся, что было 2 попытки
     expect(attempt).toBe(2);
 
-    // В базе оказалось ДВЕ записи вместо одной: списано $100 вместо $50
     const result = await observer.query<{ id: number; amount: number }>(
       "SELECT * FROM billing_orders WHERE account_id = 101"
     );
-
     expect(result.rowCount).toBe(2);
     expect(result.rows[0].amount).toBe(50);
     expect(result.rows[1].amount).toBe(50);
+  });
+
+  it("recovers safely with idempotency key: torn commit retry leaves exactly one record", async () => {
+    let attempt = 0;
+    const idempotencyKey = "order_req_unique_303";
+
+    const createIdempotentOrderTransaction = async () => {
+      attempt++;
+      const client = new Client({ connectionString: PROXY_URL });
+      client.on("error", () => {});
+      await client.connect();
+
+      if (attempt === 1) {
+        await chaos.injectTornCommit(client, 1);
+      }
+
+      try {
+        await client.query("BEGIN");
+        await client.query(
+          `INSERT INTO billing_orders (account_id, amount, idempotency_key)
+           VALUES (303, 50, $1)
+           ON CONFLICT (idempotency_key) DO NOTHING`,
+          [idempotencyKey]
+        );
+        await client.query("COMMIT");
+      } finally {
+        await client.end().catch(() => {});
+      }
+    };
+
+    await pRetry(createIdempotentOrderTransaction, {
+      retries: 2,
+      minTimeout: 50,
+      factor: 1,
+    });
+
+    expect(attempt).toBe(2);
+
+    const result = await observer.query<{ id: number; amount: number; idempotency_key: string }>(
+      "SELECT * FROM billing_orders WHERE account_id = 303"
+    );
+    expect(result.rowCount).toBe(1);
+    expect(result.rows[0].amount).toBe(50);
+    expect(result.rows[0].idempotency_key).toBe(idempotencyKey);
   });
 
   it("correctly handles synthetic deadlock retry without data duplication", async () => {
