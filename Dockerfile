@@ -1,5 +1,5 @@
-# Стейдж сборки
-FROM rust:1.80-alpine AS builder
+# Стейдж сборки бинарника
+FROM rust:1.88-alpine AS builder
 RUN apk add --no-cache musl-dev
 
 WORKDIR /app
@@ -9,8 +9,8 @@ COPY crates/ crates/
 RUN cargo build --release -p pg-interleave-server
 
 # Финальный минимальный образ
-FROM alpine:3.20
-RUN apk add --no-cache ca-certificates
+FROM alpine:3.21
+RUN apk add --no-cache ca-certificates tzdata
 
 WORKDIR /app
 COPY --from=builder /app/target/release/pg-interleave-server /usr/local/bin/pg-interleave
