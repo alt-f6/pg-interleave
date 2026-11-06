@@ -1,16 +1,41 @@
 {
   "name": "pg-interleave",
   "version": "0.1.0",
-  "description": "Deterministic concurrency testing client for PostgreSQL",
+  "description": "Deterministic PostgreSQL wire-protocol proxy client for concurrency and chaos testing",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "files": [
     "dist"
   ],
+  "engines": {
+    "node": ">=20.0.0"
+  },
   "scripts": {
     "build": "tsc",
+    "prepublishOnly": "npm run build",
     "test": "vitest run --fileParallelism=false"
   },
+  "keywords": [
+    "postgres",
+    "postgresql",
+    "concurrency",
+    "testing",
+    "chaos-engineering",
+    "race-condition",
+    "deadlock",
+    "proxy",
+    "wire-protocol"
+  ],
+  "author": "alt-f6",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/alt-f6/pg-interleave.git"
+  },
+  "bugs": {
+    "url": "https://github.com/alt-f6/pg-interleave/issues"
+  },
+  "homepage": "https://github.com/alt-f6/pg-interleave#readme",
   "devDependencies": {
     "@types/node": "^20.11.0",
     "@types/pg": "^8.11.0",
