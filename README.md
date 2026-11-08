@@ -38,7 +38,7 @@ If your scenario can be written as plain sequential `await`s on two clients, you
 
 ## Install
 
-> Docker images, release binaries and the npm package are published with each GitHub release (latest: **v0.3.2**).
+> Docker images, release binaries and the npm package are published with each GitHub release (latest: **v0.4.0**).
 
 ### 1. Run the proxy
 
@@ -141,6 +141,7 @@ Behavior you can rely on (each is covered by a test):
 - **Timeouts are errors, not silence.** If a barrier is not released within the TTL, the client receives SQLSTATE `57014` and `GET /events` reports `had_timeouts: true`, so a test can fail on it.
 - **Per-connection targeting.** Rules can be scoped to a backend PID (the SDK reads it with `pg_backend_pid()`).
 - **Extended protocol.** Prepared statements are matched when they are executed, including repeated executions, and a synthetic deadlock leaves the stream clean for the next query (checked with both `node-postgres` and `libpq`).
+- **Parameter inspection.** Match parameterized queries (`$1`, `$2`) using exact values or `"*"` wildcards via `withParams`.
 
 ## Example: a real lost update
 
@@ -195,6 +196,7 @@ const barrier = await chaos.intercept({
   // pause_before_query by default
   client, // or clientPid
   onQueryMatch: /regex/,
+  withParams: ["*", 2], // optional: match $1, $2 arguments
   action: "pause_after_response", // optional
   times: 1, // optional, default 1
 });
@@ -234,6 +236,28 @@ await pool.query(taggedSql);
 
 // 3. Resume when ready
 await barrier.resume();
+```
+
+### Prepared Statement Parameter Matching (`withParams`)
+
+When your ORM (Drizzle, Prisma, TypeORM) uses parameterized queries (`$1`, `$2`), you can scope barriers to specific argument values or use `"*"` as a wildcard:
+
+```typescript
+// Intercept only when deducting stock for item ID 2
+await chaos.intercept({
+  client,
+  onQueryMatch:
+    /UPDATE params_inventory SET stock = stock - \$1 WHERE id = \$2/,
+  withParams: [1, 2], // matches $1 = 1, $2 = 2
+});
+
+// Wildcard matching: any quantity, but strictly item ID 1
+await chaos.intercept({
+  client,
+  onQueryMatch:
+    /UPDATE params_inventory SET stock = stock - \$1 WHERE id = \$2/,
+  withParams: ["*", 1],
+});
 ```
 
 ## Schedule fuzzer (Automated Race Condition Discovery)

@@ -5,6 +5,7 @@ export interface InterceptOptions {
   clientPid?: number;
   sessionTag?: string;
   onQueryMatch: string | RegExp;
+  withParams?: Array<string | number | boolean | null>;
   action?:
     | "PAUSE_BEFORE_QUERY"
     | "PAUSE_AFTER_RESPONSE"
@@ -112,16 +113,24 @@ export class PgInterleaveClient {
       ? options.action.toLowerCase()
       : "pause_before_query";
 
+    const serializedParams = options.withParams !== undefined
+      ? options.withParams.map((p) => (p === null || p === undefined ? null : String(p)))
+      : undefined;
+
+    const body: Record<string, unknown> = {
+      query_pattern: pattern,
+      action,
+      times: options.times ?? 1,
+    };
+
+    if (pid !== undefined) body.target_pid = pid;
+    if (options.sessionTag !== undefined) body.session_tag = options.sessionTag;
+    if (serializedParams !== undefined) body.with_params = serializedParams;
+
     const res = await fetch(`${this.controlUrl}/intercept`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        target_pid: pid ?? null,
-        session_tag: options.sessionTag ?? null,
-        query_pattern: pattern,
-        action,
-        times: options.times ?? 1,
-      }),
+      body: JSON.stringify(body),
     });
 
     if (!res.ok) {

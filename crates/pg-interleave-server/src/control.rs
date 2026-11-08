@@ -29,9 +29,14 @@ struct EventsResponse {
 
 #[derive(Deserialize)]
 struct RawInterceptRequest {
+    #[serde(alias = "clientPid", alias = "client_pid", alias = "targetPid")]
     target_pid: Option<u32>,
+    #[serde(alias = "sessionTag", alias = "session_tag", alias = "session")]
     session_tag: Option<String>,
+    #[serde(alias = "queryPattern", alias = "onQueryMatch")]
     query_pattern: String,
+    #[serde(alias = "withParams", alias = "with_params")]
+    with_params: Option<Vec<serde_json::Value>>,
     action: Option<crate::barrier::BarrierAction>,
     times: Option<u32>,
 }
@@ -72,6 +77,7 @@ async fn intercept_handler(
         target_pid: payload.target_pid,
         session_tag: payload.session_tag,
         query_pattern: payload.query_pattern,
+        with_params: payload.with_params,
         action,
         times: payload.times.or(Some(1)),
     };

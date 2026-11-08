@@ -27,6 +27,7 @@ pub struct InterceptRule {
     #[allow(dead_code)]
     pub query_pattern: String,
     pub compiled_regex: Regex,
+    pub with_params: Option<Vec<serde_json::Value>>,
     pub action: BarrierAction,
     pub times: Option<u32>,
 }
@@ -39,6 +40,8 @@ pub struct InterceptRuleInput {
     pub session_tag: Option<String>,
     #[serde(alias = "queryPattern", alias = "onQueryMatch")]
     pub query_pattern: String,
+    #[serde(alias = "withParams", alias = "with_params", default)]
+    pub with_params: Option<Vec<serde_json::Value>>,
     pub action: BarrierAction,
     #[serde(default = "default_times")]
     pub times: Option<u32>,
@@ -58,6 +61,7 @@ impl TryFrom<InterceptRuleInput> for InterceptRule {
             session_tag: input.session_tag,
             query_pattern: input.query_pattern,
             compiled_regex,
+            with_params: input.with_params,
             action: input.action,
             times: input.times,
         })
@@ -95,6 +99,34 @@ pub fn extract_session_tag(query: &str) -> Option<String> {
         }
     }
     None
+}
+
+pub fn matches_params(expected: Option<&[serde_json::Value]>, actual: &[Option<String>]) -> bool {
+    let Some(expected) = expected else {
+        return true;
+    };
+
+    if expected.len() != actual.len() {
+        return false;
+    }
+
+    for (exp, act) in expected.iter().zip(actual.iter()) {
+        match (exp, act) {
+            (serde_json::Value::String(s), _) if s == "*" => continue,
+            (serde_json::Value::Null, None) => continue,
+            (serde_json::Value::String(s), Some(a)) if s == a => continue,
+            (serde_json::Value::Bool(b), Some(a)) => {
+                let short = if *b { "t" } else { "f" };
+                if *a == b.to_string() || *a == short {
+                    continue;
+                }
+                return false;
+            }
+            _ => return false,
+        }
+    }
+
+    true
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -214,6 +246,7 @@ impl SharedState {
         pid: Option<u32>,
         session_tag: Option<&str>,
         query: &str,
+        params: &[Option<String>],
     ) -> bool {
         let mut state = self.inner.lock().await;
         let mut matched_index = None;
@@ -230,6 +263,9 @@ impl SharedState {
             if let Some(ref rule_tag) = rule.session_tag
                 && Some(rule_tag.as_str()) != session_tag
             {
+                continue;
+            }
+            if !matches_params(rule.with_params.as_deref(), params) {
                 continue;
             }
             if rule.compiled_regex.is_match(query) {
@@ -262,6 +298,7 @@ impl SharedState {
         pid: Option<u32>,
         session_tag: Option<&str>,
         query: &str,
+        params: &[Option<String>],
     ) -> Option<(String, oneshot::Receiver<()>)> {
         let mut state = self.inner.lock().await;
         let mut matched_index = None;
@@ -278,6 +315,9 @@ impl SharedState {
             if let Some(ref rule_tag) = rule.session_tag
                 && Some(rule_tag.as_str()) != session_tag
             {
+                continue;
+            }
+            if !matches_params(rule.with_params.as_deref(), params) {
                 continue;
             }
             if rule.compiled_regex.is_match(query) {
@@ -327,6 +367,7 @@ impl SharedState {
         session_tag: Option<&str>,
         query: &str,
         action: BarrierAction,
+        params: &[Option<String>],
     ) -> Option<InterceptRule> {
         let mut state = self.inner.lock().await;
         let mut matched_index = None;
@@ -343,6 +384,9 @@ impl SharedState {
             if let Some(ref rule_tag) = rule.session_tag
                 && Some(rule_tag.as_str()) != session_tag
             {
+                continue;
+            }
+            if !matches_params(rule.with_params.as_deref(), params) {
                 continue;
             }
             if rule.compiled_regex.is_match(query) {
@@ -382,6 +426,7 @@ impl SharedState {
             session_tag: None,
             query_pattern: "manual".to_string(),
             compiled_regex: Regex::new(".*").unwrap(),
+            with_params: None,
             action: BarrierAction::PauseAfterResponse,
             times: Some(1),
         };

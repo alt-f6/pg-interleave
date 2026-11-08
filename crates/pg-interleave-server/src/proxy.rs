@@ -6,17 +6,22 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, lookup_host};
 use tracing::{debug, error, info, warn};
 
-use crate::barrier::{BarrierAction, ConnFuzzer, SharedState};
+use crate::barrier::{BarrierAction, ConnFuzzer, SharedState, extract_session_tag};
 use crate::protocol::{
     PgMessage, SpecialStartup, decode_regular_message, decode_startup_message,
     extract_backend_key_data, extract_simple_query, parse_extended_bind, parse_extended_execute,
     parse_extended_parse, peek_startup_type,
 };
 
+#[derive(Clone)]
+struct PortalData {
+    stmt_name: String,
+    params: Vec<Option<String>>,
+}
+
 struct ConnectionState {
     statements: HashMap<String, String>,
-    portals: HashMap<String, String>,
-    current_session_tag: Option<String>,
+    portals: HashMap<String, PortalData>,
     last_tx_status: u8,
     pending_pause_after: bool,
     response_buffer: Vec<u8>,
@@ -27,7 +32,6 @@ impl ConnectionState {
         Self {
             statements: HashMap::new(),
             portals: HashMap::new(),
-            current_session_tag: None,
             last_tx_status: b'I',
             pending_pause_after: false,
             response_buffer: Vec::new(),
@@ -197,9 +201,8 @@ async fn handle_connection(
 
                                 if m.tag == Some(b'C') {
                                     let payload_str = String::from_utf8_lossy(&m.payload);
-                                    let tag_ref = conn_scope.current_session_tag.as_deref();
                                     if payload_str.starts_with("COMMIT")
-                                        && state.should_drop_on_commit(server_pid, tag_ref, &payload_str).await
+                                        && state.should_drop_on_commit(server_pid, None, &payload_str).await
                                     {
                                         warn!(conn_id, "CHAOS: Forcing TCP connection drop right after database COMMIT!");
                                         return Ok(());
@@ -271,7 +274,7 @@ where
     W1: AsyncWriteExt + Unpin,
     W2: AsyncWriteExt + Unpin,
 {
-    let mut executed_sqls: Vec<String> = Vec::new();
+    let mut executed_sqls: Vec<(String, Vec<Option<String>>)> = Vec::new();
 
     for m in &batch {
         if let Some((stmt_name, sql)) = parse_extended_parse(m) {
@@ -279,19 +282,25 @@ where
             state.store_statement(conn_id, stmt_name, sql).await;
         }
 
-        if let Some((portal_name, stmt_name)) = parse_extended_bind(m) {
-            conn_scope.portals.insert(portal_name, stmt_name);
+        if let Some(bound) = parse_extended_bind(m) {
+            conn_scope.portals.insert(
+                bound.portal_name,
+                PortalData {
+                    stmt_name: bound.stmt_name,
+                    params: bound.params,
+                },
+            );
         }
 
         if let Some(portal_name) = parse_extended_execute(m)
-            && let Some(stmt_name) = conn_scope.portals.get(&portal_name)
-            && let Some(sql) = conn_scope.statements.get(stmt_name)
+            && let Some(portal) = conn_scope.portals.get(&portal_name)
+            && let Some(sql) = conn_scope.statements.get(&portal.stmt_name)
         {
-            executed_sqls.push(sql.clone());
+            executed_sqls.push((sql.clone(), portal.params.clone()));
         }
 
         if let Some(sql) = extract_simple_query(m) {
-            executed_sqls.push(sql);
+            executed_sqls.push((sql, Vec::new()));
         }
 
         if m.tag == Some(b'C') && m.payload.len() >= 2 {
@@ -308,7 +317,9 @@ where
         }
     }
 
-    for sql in &executed_sqls {
+    for (sql, params) in &executed_sqls {
+        let session_tag = extract_session_tag(sql);
+
         let is_internal_query = sql.contains("pg_backend_pid");
 
         if !is_internal_query && let Some(fuzz) = fuzzer.as_deref_mut() {
@@ -319,14 +330,12 @@ where
             }
         }
 
-        info!(conn_id, query = %sql, "-> Inspecting batch query");
+        info!(conn_id, query = %sql, ?params, "-> Inspecting batch query");
 
-        if let Some(tag) = crate::barrier::extract_session_tag(sql) {
-            conn_scope.current_session_tag = Some(tag);
-        }
-        let tag_ref = conn_scope.current_session_tag.as_deref();
-
-        if state.check_deadlock_match(server_pid, tag_ref, sql).await {
+        if state
+            .check_deadlock_match(server_pid, session_tag.as_deref(), sql, params)
+            .await
+        {
             warn!(conn_id, query = %sql, "CHAOS: Injecting synthetic 40P01 Deadlock, dropping batch");
 
             let err_msg = PgMessage::build_error_response(
@@ -345,14 +354,20 @@ where
         }
 
         if let Some(_rule) = state
-            .check_action_match(server_pid, tag_ref, sql, BarrierAction::PauseAfterResponse)
+            .check_action_match(
+                server_pid,
+                session_tag.as_deref(),
+                sql,
+                BarrierAction::PauseAfterResponse,
+                params,
+            )
             .await
         {
             conn_scope.pending_pause_after = true;
         }
 
         if let Some((barrier_id, receiver)) = state
-            .check_and_create_barrier(server_pid, tag_ref, sql)
+            .check_and_create_barrier(server_pid, session_tag.as_deref(), sql, params)
             .await
         {
             info!(conn_id, barrier_id = %barrier_id, ttl_ms = barrier_ttl_ms, "Waiting for resume command before sending batch...");

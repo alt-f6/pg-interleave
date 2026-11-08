@@ -25,6 +25,13 @@ pub enum MessageDirection {
     ServerToClient,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundPortal {
+    pub portal_name: String,
+    pub stmt_name: String,
+    pub params: Vec<Option<String>>,
+}
+
 #[derive(Debug, Clone)]
 pub struct PgMessage {
     pub tag: Option<u8>,
@@ -187,14 +194,121 @@ pub fn parse_extended_parse(msg: &PgMessage) -> Option<(String, String)> {
     Some((stmt_name, query))
 }
 
-pub fn parse_extended_bind(msg: &PgMessage) -> Option<(String, String)> {
+pub fn parse_extended_bind(msg: &PgMessage) -> Option<BoundPortal> {
     if msg.tag != Some(b'B') {
         return None;
     }
-    let mut parts = msg.payload.split(|&b| b == 0);
-    let portal_name = String::from_utf8(parts.next()?.to_vec()).ok()?;
-    let stmt_name = String::from_utf8(parts.next()?.to_vec()).ok()?;
-    Some((portal_name, stmt_name))
+    let payload = &msg.payload;
+    let mut cursor = 0;
+
+    let portal_end = payload[cursor..].iter().position(|&b| b == 0)?;
+    let portal_name = String::from_utf8(payload[cursor..cursor + portal_end].to_vec()).ok()?;
+    cursor += portal_end + 1;
+
+    let stmt_end = payload[cursor..].iter().position(|&b| b == 0)?;
+    let stmt_name = String::from_utf8(payload[cursor..cursor + stmt_end].to_vec()).ok()?;
+    cursor += stmt_end + 1;
+
+    if cursor + 2 > payload.len() {
+        return None;
+    }
+    let num_formats = i16::from_be_bytes([payload[cursor], payload[cursor + 1]]) as usize;
+    cursor += 2;
+
+    let mut formats = Vec::with_capacity(num_formats);
+    if cursor + num_formats * 2 > payload.len() {
+        return None;
+    }
+    for _ in 0..num_formats {
+        formats.push(i16::from_be_bytes([payload[cursor], payload[cursor + 1]]));
+        cursor += 2;
+    }
+
+    if cursor + 2 > payload.len() {
+        return None;
+    }
+    let num_params = i16::from_be_bytes([payload[cursor], payload[cursor + 1]]) as usize;
+    cursor += 2;
+
+    let mut params = Vec::with_capacity(num_params);
+    for i in 0..num_params {
+        if cursor + 4 > payload.len() {
+            return None;
+        }
+        let val_len = i32::from_be_bytes([
+            payload[cursor],
+            payload[cursor + 1],
+            payload[cursor + 2],
+            payload[cursor + 3],
+        ]);
+        cursor += 4;
+
+        if val_len == -1 {
+            params.push(None);
+            continue;
+        }
+
+        let val_len = val_len as usize;
+        if cursor + val_len > payload.len() {
+            return None;
+        }
+        let val_bytes = &payload[cursor..cursor + val_len];
+        cursor += val_len;
+
+        let format = if formats.is_empty() {
+            0
+        } else if formats.len() == 1 {
+            formats[0]
+        } else if i < formats.len() {
+            formats[i]
+        } else {
+            0
+        };
+
+        if format == 0 {
+            params.push(Some(String::from_utf8_lossy(val_bytes).to_string()));
+        } else {
+            match val_len {
+                2 => {
+                    let v = i16::from_be_bytes([val_bytes[0], val_bytes[1]]);
+                    params.push(Some(v.to_string()));
+                }
+                4 => {
+                    let v = i32::from_be_bytes([
+                        val_bytes[0],
+                        val_bytes[1],
+                        val_bytes[2],
+                        val_bytes[3],
+                    ]);
+                    params.push(Some(v.to_string()));
+                }
+                8 => {
+                    let v = i64::from_be_bytes([
+                        val_bytes[0],
+                        val_bytes[1],
+                        val_bytes[2],
+                        val_bytes[3],
+                        val_bytes[4],
+                        val_bytes[5],
+                        val_bytes[6],
+                        val_bytes[7],
+                    ]);
+                    params.push(Some(v.to_string()));
+                }
+                _ => {
+                    let s = String::from_utf8(val_bytes.to_vec())
+                        .unwrap_or_else(|_| format!("{:?}", val_bytes));
+                    params.push(Some(s));
+                }
+            }
+        }
+    }
+
+    Some(BoundPortal {
+        portal_name,
+        stmt_name,
+        params,
+    })
 }
 
 pub fn parse_extended_execute(msg: &PgMessage) -> Option<String> {
@@ -284,6 +398,38 @@ mod tests {
         assert_eq!(decoded.tag, original.tag);
         assert_eq!(decoded.payload, original.payload);
         assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn test_parse_extended_bing_parameters() {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(b"portal_1\0");
+        payload.extend_from_slice(b"stmt_1\0");
+        payload.extend_from_slice(&0i16.to_be_bytes());
+        payload.extend_from_slice(&3i16.to_be_bytes());
+
+        payload.extend_from_slice(&2i32.to_be_bytes());
+        payload.extend_from_slice(b"42");
+
+        payload.extend_from_slice(&(-1i32).to_be_bytes());
+
+        payload.extend_from_slice(&5i32.to_be_bytes());
+        payload.extend_from_slice(b"hello");
+
+        payload.extend_from_slice(&0i16.to_be_bytes());
+
+        let msg = PgMessage {
+            tag: Some(b'B'),
+            payload,
+        };
+
+        let bound = parse_extended_bind(&msg).unwrap();
+        assert_eq!(bound.portal_name, "portal_1");
+        assert_eq!(bound.stmt_name, "stmt_1");
+        assert_eq!(
+            bound.params,
+            vec![Some("42".to_string()), None, Some("hello".to_string())]
+        );
     }
 
     proptest! {

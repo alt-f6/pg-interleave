@@ -15,6 +15,7 @@ describe("SQL Comment Session Routing (Connection Pools)", () => {
     });
 
     await pool.query(`
+      DROP TABLE IF EXISTS inventory CASCADE;
       CREATE TABLE IF NOT EXISTS inventory (
         id INT PRIMARY KEY,
         stock INT NOT NULL
