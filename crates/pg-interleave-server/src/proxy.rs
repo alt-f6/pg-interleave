@@ -307,6 +307,18 @@ where
     }
 
     for sql in &executed_sqls {
+        let is_control_query = sql.contains("pg_backend_pid")
+            || sql.eq_ignore_ascii_case("BEGIN")
+            || sql.eq_ignore_ascii_case("COMMIT")
+            || sql.eq_ignore_ascii_case("ROLLBACK");
+
+        if !is_control_query {
+            if let Some(delay_ms) = state.next_fuzz_delay().await {
+                debug!(conn_id, delay_ms, "Fuzz delay injected");
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            }
+        }
+
         info!(conn_id, query = %sql, "-> Inspecting batch query");
 
         if let Some(tag) = crate::barrier::extract_session_tag(sql) {

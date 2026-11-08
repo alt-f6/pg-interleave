@@ -25,6 +25,15 @@ struct Args {
 
     #[arg(long, default_value = "5000")]
     barrier_ttl_ms: u64,
+
+    #[arg(long)]
+    fuzz: bool,
+
+    #[arg(long)]
+    seed: Option<u64>,
+
+    #[arg(long, default_value = "50")]
+    fuzz_max_delay_ms: u64,
 }
 
 #[tokio::main]
@@ -35,7 +44,19 @@ async fn main() -> anyhow::Result<()> {
     tracing::subscriber::set_global_default(subscriber)?;
 
     let args = Args::parse();
-    let state = barrier::SharedState::new();
+
+    let fuzz_seed = if args.fuzz {
+        let seed = args.seed.unwrap_or_else(|| fastrand::u64(..));
+        info!(
+            "Schedule fuzzer ENABLED. Seed: {} (use --seed {} to reproduce)",
+            seed, seed
+        );
+        Some(seed)
+    } else {
+        None
+    };
+
+    let state = barrier::SharedState::new(fuzz_seed, args.fuzz_max_delay_ms);
 
     let proxy_handle = {
         let state = state.clone();

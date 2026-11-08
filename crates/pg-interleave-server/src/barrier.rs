@@ -99,8 +99,33 @@ pub fn extract_session_tag(query: &str) -> Option<String> {
 }
 
 #[allow(dead_code)]
+
+pub struct Fuzzer {
+    rng: fastrand::Rng,
+    max_delay_ms: u64,
+}
+
+impl Fuzzer {
+    pub fn new(seed: u64, max_delay_ms: u64) -> Self {
+        Self {
+            rng: fastrand::Rng::with_seed(seed),
+            max_delay_ms,
+        }
+    }
+
+    pub fn next_delay(&mut self) -> u64 {
+        if self.max_delay_ms == 0 {
+            0
+        } else {
+            self.rng.u64(0..=self.max_delay_ms)
+        }
+    }
+}
+
 pub struct ActiveBarrier {
+    #[allow(dead_code)]
     pub id: u64,
+    #[allow(dead_code)]
     pub rule: InterceptRule,
     pub resume_sender: Option<oneshot::Sender<()>>,
 }
@@ -112,6 +137,7 @@ pub struct BarrierState {
     pub pid_to_conn: HashMap<u32, u64>,
     pub client_statements: HashMap<u64, HashMap<String, String>>,
     pub had_timeouts: bool,
+    pub fuzzer: Option<Fuzzer>,
 }
 
 #[derive(Clone)]
@@ -121,9 +147,14 @@ pub struct SharedState {
 }
 
 impl SharedState {
-    pub fn new() -> Self {
+    pub fn new(fuzz_seed: Option<u64>, fuzz_max_delay_ms: u64) -> Self {
+        let fuzzer = fuzz_seed.map(|seed| Fuzzer::new(seed, fuzz_max_delay_ms));
+        let state = BarrierState {
+            fuzzer,
+            ..BarrierState::default()
+        };
         Self {
-            inner: Arc::new(Mutex::new(BarrierState::default())),
+            inner: Arc::new(Mutex::new(state)),
             barrier_counter: Arc::new(AtomicU64::new(1)),
         }
     }
@@ -449,5 +480,11 @@ impl SharedState {
         if let Some(p) = pid {
             st.pid_to_conn.remove(&p);
         }
+    }
+
+    pub async fn next_fuzz_delay(&self) -> Option<u64> {
+        let mut state = self.inner.lock().await;
+        let delay = state.fuzzer.as_mut()?.next_delay();
+        if delay > 0 { Some(delay) } else { None }
     }
 }

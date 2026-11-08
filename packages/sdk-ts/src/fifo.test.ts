@@ -29,39 +29,48 @@ describe("Deterministic FIFO Queue Ordering", () => {
   });
 
   it("releases 3 barriers strictly in creation order via resume-next", async () => {
-    const b1 = await chaos.intercept({ client: c1, onQueryMatch: /SELECT 101/ });
-    const b2 = await chaos.intercept({ client: c2, onQueryMatch: /SELECT 202/ });
-    const b3 = await chaos.intercept({ client: c3, onQueryMatch: /SELECT 303/ });
+    await chaos.intercept({ client: c1, onQueryMatch: /SELECT 101/ });
+    await chaos.intercept({ client: c2, onQueryMatch: /SELECT 202/ });
+    await chaos.intercept({ client: c3, onQueryMatch: /SELECT 303/ });
 
     let p1Done = false;
     let p2Done = false;
     let p3Done = false;
 
     const p1 = c1.query("SELECT 101").then(() => { p1Done = true; });
-    await b1.wait();
+    while ((await chaos.barriers()).length < 1) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
 
     const p2 = c2.query("SELECT 202").then(() => { p2Done = true; });
-    await b2.wait();
+    while ((await chaos.barriers()).length < 2) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
 
     const p3 = c3.query("SELECT 303").then(() => { p3Done = true; });
-    await b3.wait();
+    while ((await chaos.barriers()).length < 3) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
 
     expect(p1Done).toBe(false);
     expect(p2Done).toBe(false);
     expect(p3Done).toBe(false);
 
-    await b1.resume();
+    const r1 = await chaos.resumeNext();
+    expect(r1.status).toBe("resumed");
     await p1;
     expect(p1Done).toBe(true);
     expect(p2Done).toBe(false);
     expect(p3Done).toBe(false);
 
-    await b2.resume();
+    const r2 = await chaos.resumeNext();
+    expect(r2.status).toBe("resumed");
     await p2;
     expect(p2Done).toBe(true);
     expect(p3Done).toBe(false);
 
-    await b3.resume();
+    const r3 = await chaos.resumeNext();
+    expect(r3.status).toBe("resumed");
     await p3;
     expect(p3Done).toBe(true);
   });

@@ -223,6 +223,42 @@ await pool.query(taggedSql);
 await barrier.resume();
 ```
 
+## Schedule fuzzer
+
+Barriers let you test an interleaving you already thought of. The schedule fuzzer is for the ones you did not: it adds pseudo-random delays (jitter) before queries are forwarded to PostgreSQL, so that concurrent transactions reach the database in different orders from run to run. Run your existing concurrent tests under it and see whether anything breaks.
+
+```bash
+# start the proxy with fuzzing enabled
+cargo run --release -p pg-interleave-server -- \
+  --fuzz \
+  --fuzz-max-delay-ms 30
+```
+
+The proxy logs the seed it picked, so a failure can be replayed:
+
+```
+INFO pg_interleave_server: Schedule fuzzer ENABLED. Seed: 133742 (use --seed 133742 to reproduce)
+```
+
+If a test fails in CI under fuzzing, start the proxy locally with the logged seed and rerun the same test:
+
+```bash
+cargo run --release -p pg-interleave-server -- \
+  --fuzz --seed 133742 --fuzz-max-delay-ms 30
+```
+
+| Flag                  | Meaning                                                                              |
+| --------------------- | ------------------------------------------------------------------------------------ |
+| `--fuzz`              | Enable schedule fuzzing. Off by default.                                             |
+| `--seed <u64>`        | Seed for the pseudo-random generator. If omitted, a random one is chosen and logged. |
+| `--fuzz-max-delay-ms` | Upper bound for a single injected delay, in milliseconds.                            |
+
+What to expect:
+
+- **Replay is best effort.** The seed fixes the injected delays. The final interleaving also depends on your client and on machine load, so a failure that depends on very tight timing may need a few runs to show up again. A failure that does not reproduce with its seed is still a signal that the test is timing sensitive.
+- **It finds, it does not prove.** Fuzzing samples schedules. A green run means these schedules passed, not that the code is race free. Run it with several seeds.
+- **Fuzzing adds latency.** Every delayed query costs up to `--fuzz-max-delay-ms`, so keep the bound small in CI.
+
 ## HTTP control plane
 
 | Method and path     | Purpose                                                                                               |

@@ -65,6 +65,24 @@ export class PgInterleaveClient {
     }
   }
 
+  async resumeNext(): Promise<{ status: string, barrier_id?: string }> {
+    const res = await fetch(`${this.controlUrl}/resume-next`, {
+      method: "POST",
+    });
+    if (!res.ok) {
+      throw new Error(`Failed to resume next barrier: HTTP ${res.status}`);
+    }
+    return (await res.json()) as { status: string; barrier_id?: string };
+  }
+
+  async barriers(): Promise<string[]> {
+    const res = await fetch(`${this.controlUrl}/barriers`);
+    if (!res.ok) {
+      throw new Error(`Failed to fetch active barriers: HTTP ${res.status}`);
+    }
+    return (await res.json()) as string[];
+  }
+
   async hasTimeouts(): Promise<boolean> {
     const res = await fetch(`${this.controlUrl}/events`);
     if (!res.ok) {
