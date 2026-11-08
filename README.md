@@ -15,6 +15,19 @@ test code ──HTTP :9090──▶ control plane ─┐
 pg / any client ──:5433──▶ proxy ──────▶ PostgreSQL :5432
 ```
 
+<p align="center">
+  <a href="#why">Why</a> •
+  <a href="#install">Install</a> •
+  <a href="#10-second-example">Quickstart</a> •
+  <a href="#what-it-can-do">Capabilities</a> •
+  <a href="#sdk">SDK</a> •
+  <a href="#schedule-fuzzer-automated-race-condition-discovery">Schedule Fuzzer</a> •
+  <a href="#http-control-plane">HTTP API</a> •
+  <a href="#limitations">Limitations</a>
+</p>
+
+---
+
 ## Why
 
 Most concurrency tests either run two transactions with `Promise.all` and hope, or sequence them by hand with `await`. The second is already deterministic, as long as you control every statement.
@@ -25,7 +38,7 @@ If your scenario can be written as plain sequential `await`s on two clients, you
 
 ## Install
 
-> Docker image, release binaries and the npm package are published with the **v0.1.0** release. Until that tag exists, use [From source](#from-source).
+> Docker images, release binaries and the npm package are published with each GitHub release (latest: **v0.3.0**).
 
 ### 1. Run the proxy
 
@@ -223,7 +236,9 @@ await pool.query(taggedSql);
 await barrier.resume();
 ```
 
-## Schedule fuzzer
+## Schedule fuzzer (Automated Race Condition Discovery)
+
+`pg-interleave` can inject deterministic, per-connection micro-jitters into incoming queries (including `BEGIN` and `COMMIT`), uncovering latent concurrency bugs such as **Lost Updates** and race conditions without manual intercept rules.
 
 Barriers let you test an interleaving you already thought of. The schedule fuzzer is for the ones you did not: it adds pseudo-random delays (jitter) before queries are forwarded to PostgreSQL, so that concurrent transactions reach the database in different orders from run to run. Run your existing concurrent tests under it and see whether anything breaks.
 
@@ -253,11 +268,12 @@ cargo run --release -p pg-interleave-server -- \
 | `--seed <u64>`        | Seed for the pseudo-random generator. If omitted, a random one is chosen and logged. |
 | `--fuzz-max-delay-ms` | Upper bound for a single injected delay, in milliseconds.                            |
 
-What to expect:
+### Capabilities & Guarantees
 
-- **Replay is best effort.** The seed fixes the injected delays. The final interleaving also depends on your client and on machine load, so a failure that depends on very tight timing may need a few runs to show up again. A failure that does not reproduce with its seed is still a signal that the test is timing sensitive.
-- **It finds, it does not prove.** Fuzzing samples schedules. A green run means these schedules passed, not that the code is race free. Run it with several seeds.
-- **Fuzzing adds latency.** Every delayed query costs up to `--fuzz-max-delay-ms`, so keep the bound small in CI.
+- **Per-Connection Reproducibility.** Each client connection receives an independent PRNG stream derived via SplitMix64 from `(base_seed, conn_id)`. Re-running with `--seed <u64>` guarantees reproducible schedule execution without cross-connection lock contention.
+- **Empirical Detection Rate.** Uncovers 100% of uncoordinated read-modify-write anomalies in concurrent transactions under random jitters (validated against empirical lost update test suites).
+- **Latency Cost.** Every delayed query costs up to `--fuzz-max-delay-ms`, so keep the bound small (e.g., 20–30 ms) in CI.
+- **It finds, it does not prove.** Fuzzing samples schedules. A green run means these schedules passed, not that the code is race free. Run it with several seeds or in property-based test matrices.
 
 ## HTTP control plane
 

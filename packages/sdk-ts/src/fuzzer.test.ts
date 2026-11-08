@@ -2,57 +2,58 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { Client } from "pg";
 import { PgInterleaveClient } from "./index";
 
-describe("Schedule Fuzzer & Jitter Injection", () => {
+describe("Schedule Fuzzer Empirical Validation", () => {
   const chaos = new PgInterleaveClient("http://127.0.0.1:9090");
-  let c1: Client;
-  let c2: Client;
+  const connStr = "postgres://postgres:postgres@127.0.0.1:5433/postgres";
+  let adminClient: Client;
 
   beforeEach(async () => {
     await chaos.reset();
-    const connStr = "postgres://postgres:postgres@127.0.0.1:5433/postgres";
-    c1 = new Client({ connectionString: connStr });
-    c2 = new Client({ connectionString: connStr });
+    adminClient = new Client({ connectionString: connStr });
+    await adminClient.connect();
 
-    await c1.connect();
-    await c2.connect();
-
-    await c1.query(`
-      CREATE TABLE IF NOT EXISTS fuzz_counter (
+    await adminClient.query(`
+      CREATE TABLE IF NOT EXISTS test_balance (
         id INT PRIMARY KEY,
-        val INT NOT NULL
+        amount INT NOT NULL
       );
-      INSERT INTO fuzz_counter (id, val) VALUES (1, 0)
-      ON CONFLICT (id) DO UPDATE SET val = 0;
     `);
   });
 
   afterEach(async () => {
-    const timedOut = await chaos.hasTimeouts();
-    expect(timedOut).toBe(false);
-    await c1.end();
-    await c2.end();
+    await adminClient.end();
   });
 
-  it("completes concurrent transactions reliably despite randomized query jitters", async () => {
-    const iterations = 5;
+  it("exposes race condition in uncoordinated read-modify-write transactions", async () => {
+    let lostUpdateCount = 0;
+    const runs = 20;
 
-    for (let i = 0; i < iterations; i++) {
-      const p1 = (async () => {
-        await c1.query("BEGIN");
-        await c1.query("UPDATE fuzz_counter SET val = val + 1 WHERE id = 1");
-        await c1.query("COMMIT");
-      })();
+    for (let i = 0; i < runs; i++) {
+      await adminClient.query("INSERT INTO test_balance (id, amount) VALUES (1, 100) ON CONFLICT (id) DO UPDATE SET amount = 100");
 
-      const p2 = (async () => {
-        await c2.query("BEGIN");
-        await c2.query("UPDATE fuzz_counter SET val = val + 1 WHERE id = 1");
-        await c2.query("COMMIT");
-      })();
+      const c1 = new Client({ connectionString: connStr });
+      const c2 = new Client({ connectionString: connStr });
+      await Promise.all([c1.connect(), c2.connect()]);
 
-      await Promise.all([p1, p2]);
+      const tx = async (client: Client) => {
+        await client.query("BEGIN");
+        const res = await client.query<{ amount: number }>("SELECT amount FROM test_balance WHERE id = 1");
+        const current = res.rows[0].amount;
+        await new Promise((r) => setTimeout(r, 5));
+        await client.query(`UPDATE test_balance SET amount = ${current - 10} WHERE id = 1`);
+        await client.query("COMMIT");
+      };
+
+      await Promise.all([tx(c1), tx(c2)]);
+      await Promise.all([c1.end(), c2.end()]);
+
+      const finalRes = await adminClient.query<{ amount: number }>("SELECT amount FROM test_balance WHERE id = 1");
+      if (finalRes.rows[0].amount === 90) {
+        lostUpdateCount++;
+      }
     }
 
-    const res = await c1.query<{ val: number }>("SELECT val FROM fuzz_counter WHERE id = 1");
-    expect(res.rows[0].val).toBe(iterations * 2);
+    console.log(`[Fuzzer Detection Rate] Lost Updates caught: ${lostUpdateCount} / ${runs} runs (${(lostUpdateCount / runs) * 100}%)`);
+    expect(lostUpdateCount).toBeGreaterThan(0);
   });
 });

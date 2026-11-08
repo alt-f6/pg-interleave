@@ -6,7 +6,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, lookup_host};
 use tracing::{debug, error, info, warn};
 
-use crate::barrier::{BarrierAction, SharedState};
+use crate::barrier::{BarrierAction, ConnFuzzer, SharedState};
 use crate::protocol::{
     PgMessage, SpecialStartup, decode_regular_message, decode_startup_message,
     extract_backend_key_data, extract_simple_query, parse_extended_bind, parse_extended_execute,
@@ -75,6 +75,8 @@ async fn handle_connection(
     state: SharedState,
     barrier_ttl_ms: u64,
 ) -> anyhow::Result<()> {
+    let mut conn_fuzzer = state.fuzzer().await.map(|f| f.for_connection(conn_id));
+
     let mut resolved = lookup_host(target_addr).await?;
     let target_sock = resolved
         .next()
@@ -162,6 +164,7 @@ async fn handle_connection(
                                         barrier_ttl_ms,
                                         &mut client_write,
                                         &mut server_write,
+                                        conn_fuzzer.as_mut(),
                                     ).await?;
                                 }
                             }
@@ -217,7 +220,6 @@ async fn handle_connection(
                                             cleanup_state.record_timeout(&b_id).await;
                                             warn!(conn_id, barrier_id = %barrier_id, "PauseAfterResponse barrier timed out! Emitting 57014");
 
-                                            // Drop buffered response and emit 57014 on timeout
                                             conn_scope.response_buffer.clear();
                                             let err_msg = PgMessage::build_error_response(
                                                 "57014",
@@ -249,7 +251,6 @@ async fn handle_connection(
         Ok(())
     }.await;
 
-    // Cleanup connection state on close
     state.cleanup_connection(conn_id, server_pid).await;
     res
 }
@@ -264,6 +265,7 @@ async fn process_client_batch<W1, W2>(
     barrier_ttl_ms: u64,
     client_write: &mut W1,
     server_write: &mut W2,
+    mut fuzzer: Option<&mut ConnFuzzer>,
 ) -> anyhow::Result<()>
 where
     W1: AsyncWriteExt + Unpin,
@@ -307,15 +309,13 @@ where
     }
 
     for sql in &executed_sqls {
-        let is_control_query = sql.contains("pg_backend_pid")
-            || sql.eq_ignore_ascii_case("BEGIN")
-            || sql.eq_ignore_ascii_case("COMMIT")
-            || sql.eq_ignore_ascii_case("ROLLBACK");
+        let is_internal_query = sql.contains("pg_backend_pid");
 
-        if !is_control_query {
-            if let Some(delay_ms) = state.next_fuzz_delay().await {
-                debug!(conn_id, delay_ms, "Fuzz delay injected");
-                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+        if !is_internal_query && let Some(fuzz) = fuzzer.as_deref_mut() {
+            let delay = fuzz.next_delay();
+            if delay > 0 {
+                debug!(conn_id, delay_ms = delay, "Deterministic jitter injected");
+                tokio::time::sleep(Duration::from_millis(delay)).await;
             }
         }
 

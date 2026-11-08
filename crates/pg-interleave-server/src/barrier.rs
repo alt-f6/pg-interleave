@@ -75,7 +75,6 @@ impl<'de> Deserialize<'de> for InterceptRule {
 }
 
 pub fn extract_session_tag(query: &str) -> Option<String> {
-    // Matches /* interleave: session=A */ or /* interleave: A */
     if let Some(start) = query.find("/*")
         && let Some(end) = query[start..].find("*/")
     {
@@ -98,21 +97,40 @@ pub fn extract_session_tag(query: &str) -> Option<String> {
     None
 }
 
-#[allow(dead_code)]
-
+#[derive(Clone, Copy, Debug)]
 pub struct Fuzzer {
-    rng: fastrand::Rng,
-    max_delay_ms: u64,
+    pub base_seed: u64,
+    pub max_delay_ms: u64,
 }
 
 impl Fuzzer {
-    pub fn new(seed: u64, max_delay_ms: u64) -> Self {
+    pub fn new(base_seed: u64, max_delay_ms: u64) -> Self {
         Self {
-            rng: fastrand::Rng::with_seed(seed),
+            base_seed,
             max_delay_ms,
         }
     }
 
+    pub fn for_connection(&self, conn_id: u64) -> ConnFuzzer {
+        let mut mixed = self.base_seed.wrapping_add(0x9e3779b97f4a7c15);
+        mixed ^= conn_id.wrapping_mul(0xbf58476d1ce4e5b9);
+        mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+        mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94d049bb133111eb);
+        let conn_seed = mixed ^ (mixed >> 31);
+
+        ConnFuzzer {
+            rng: fastrand::Rng::with_seed(conn_seed),
+            max_delay_ms: self.max_delay_ms,
+        }
+    }
+}
+
+pub struct ConnFuzzer {
+    rng: fastrand::Rng,
+    max_delay_ms: u64,
+}
+
+impl ConnFuzzer {
     pub fn next_delay(&mut self) -> u64 {
         if self.max_delay_ms == 0 {
             0
@@ -482,9 +500,29 @@ impl SharedState {
         }
     }
 
-    pub async fn next_fuzz_delay(&self) -> Option<u64> {
-        let mut state = self.inner.lock().await;
-        let delay = state.fuzzer.as_mut()?.next_delay();
-        if delay > 0 { Some(delay) } else { None }
+    pub async fn fuzzer(&self) -> Option<Fuzzer> {
+        let state = self.inner.lock().await;
+        state.fuzzer
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_fuzzer_deterministic_per_connection_sequence() {
+        let fuzzer = Fuzzer::new(42, 50);
+
+        let mut conn1_a = fuzzer.for_connection(1);
+        let mut conn1_b = fuzzer.for_connection(1);
+        let mut conn2 = fuzzer.for_connection(2);
+
+        let seq1_a: Vec<u64> = (0..5).map(|_| conn1_a.next_delay()).collect();
+        let seq1_b: Vec<u64> = (0..5).map(|_| conn1_b.next_delay()).collect();
+        let seq2: Vec<u64> = (0..5).map(|_| conn2.next_delay()).collect();
+
+        assert_eq!(seq1_a, seq1_b);
+        assert_ne!(seq1_a, seq2);
     }
 }
