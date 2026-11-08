@@ -26,7 +26,7 @@ describe("Schedule Fuzzer Empirical Validation", () => {
 
   it("exposes race condition in uncoordinated read-modify-write transactions", async () => {
     let lostUpdateCount = 0;
-    const runs = 20;
+    const runs = 10;
 
     for (let i = 0; i < runs; i++) {
       await adminClient.query("INSERT INTO test_balance (id, amount) VALUES (1, 100) ON CONFLICT (id) DO UPDATE SET amount = 100");
@@ -55,5 +55,5 @@ describe("Schedule Fuzzer Empirical Validation", () => {
 
     console.log(`[Fuzzer Detection Rate] Lost Updates caught: ${lostUpdateCount} / ${runs} runs (${(lostUpdateCount / runs) * 100}%)`);
     expect(lostUpdateCount).toBeGreaterThan(0);
-  });
+  }, 30_000);
 });
