@@ -30,6 +30,7 @@ struct EventsResponse {
 #[derive(Deserialize)]
 struct RawInterceptRequest {
     target_pid: Option<u32>,
+    session_tag: Option<String>,
     query_pattern: String,
     action: Option<crate::barrier::BarrierAction>,
     times: Option<u32>,
@@ -69,6 +70,7 @@ async fn intercept_handler(
 
     let input = InterceptRuleInput {
         target_pid: payload.target_pid,
+        session_tag: payload.session_tag,
         query_pattern: payload.query_pattern,
         action,
         times: payload.times.or(Some(1)),

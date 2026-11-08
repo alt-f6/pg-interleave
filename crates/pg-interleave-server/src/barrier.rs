@@ -23,6 +23,7 @@ pub enum BarrierAction {
 #[derive(Debug, Clone)]
 pub struct InterceptRule {
     pub target_pid: Option<u32>,
+    pub session_tag: Option<String>,
     #[allow(dead_code)]
     pub query_pattern: String,
     pub compiled_regex: Regex,
@@ -34,6 +35,8 @@ pub struct InterceptRule {
 pub struct InterceptRuleInput {
     #[serde(alias = "clientPid", alias = "client_pid", alias = "targetPid")]
     pub target_pid: Option<u32>,
+    #[serde(alias = "sessionTag", alias = "session_tag", alias = "session")]
+    pub session_tag: Option<String>,
     #[serde(alias = "queryPattern", alias = "onQueryMatch")]
     pub query_pattern: String,
     pub action: BarrierAction,
@@ -52,6 +55,7 @@ impl TryFrom<InterceptRuleInput> for InterceptRule {
         let compiled_regex = Regex::new(&input.query_pattern)?;
         Ok(Self {
             target_pid: input.target_pid,
+            session_tag: input.session_tag,
             query_pattern: input.query_pattern,
             compiled_regex,
             action: input.action,
@@ -68,6 +72,30 @@ impl<'de> Deserialize<'de> for InterceptRule {
         let input = InterceptRuleInput::deserialize(deserializer)?;
         InterceptRule::try_from(input).map_err(serde::de::Error::custom)
     }
+}
+
+pub fn extract_session_tag(query: &str) -> Option<String> {
+    // Matches /* interleave: session=A */ or /* interleave: A */
+    if let Some(start) = query.find("/*")
+        && let Some(end) = query[start..].find("*/")
+    {
+        let comment = &query[start + 2..start + end];
+        let trimmed = comment.trim();
+        if let Some(rest) = trimmed.strip_prefix("interleave:") {
+            for token in rest.split([',', ' ', ';']) {
+                let token = token.trim();
+                if let Some(tag) = token
+                    .strip_prefix("session=")
+                    .or_else(|| token.strip_prefix("tag="))
+                {
+                    return Some(tag.trim_matches(['\'', '"']).to_string());
+                } else if !token.is_empty() && !token.contains('=') {
+                    return Some(token.trim_matches(['\'', '"']).to_string());
+                }
+            }
+        }
+    }
+    None
 }
 
 #[allow(dead_code)]
@@ -132,7 +160,12 @@ impl SharedState {
             .insert(stmt_name, query);
     }
 
-    pub async fn check_deadlock_match(&self, pid: Option<u32>, query: &str) -> bool {
+    pub async fn check_deadlock_match(
+        &self,
+        pid: Option<u32>,
+        session_tag: Option<&str>,
+        query: &str,
+    ) -> bool {
         let mut state = self.inner.lock().await;
         let mut matched_index = None;
 
@@ -142,6 +175,11 @@ impl SharedState {
             }
             if let Some(target_pid) = rule.target_pid
                 && Some(target_pid) != pid
+            {
+                continue;
+            }
+            if let Some(ref rule_tag) = rule.session_tag
+                && Some(rule_tag.as_str()) != session_tag
             {
                 continue;
             }
@@ -173,6 +211,7 @@ impl SharedState {
     pub async fn check_and_create_barrier(
         &self,
         pid: Option<u32>,
+        session_tag: Option<&str>,
         query: &str,
     ) -> Option<(String, oneshot::Receiver<()>)> {
         let mut state = self.inner.lock().await;
@@ -184,6 +223,11 @@ impl SharedState {
             }
             if let Some(target_pid) = rule.target_pid
                 && Some(target_pid) != pid
+            {
+                continue;
+            }
+            if let Some(ref rule_tag) = rule.session_tag
+                && Some(rule_tag.as_str()) != session_tag
             {
                 continue;
             }
@@ -231,6 +275,7 @@ impl SharedState {
     pub async fn check_action_match(
         &self,
         pid: Option<u32>,
+        session_tag: Option<&str>,
         query: &str,
         action: BarrierAction,
     ) -> Option<InterceptRule> {
@@ -243,6 +288,11 @@ impl SharedState {
             }
             if let Some(target_pid) = rule.target_pid
                 && Some(target_pid) != pid
+            {
+                continue;
+            }
+            if let Some(ref rule_tag) = rule.session_tag
+                && Some(rule_tag.as_str()) != session_tag
             {
                 continue;
             }
@@ -280,6 +330,7 @@ impl SharedState {
 
         let dummy_rule = InterceptRule {
             target_pid: None,
+            session_tag: None,
             query_pattern: "manual".to_string(),
             compiled_regex: Regex::new(".*").unwrap(),
             action: BarrierAction::PauseAfterResponse,
@@ -298,7 +349,12 @@ impl SharedState {
         (barrier_id, rx)
     }
 
-    pub async fn should_drop_on_commit(&self, pid: Option<u32>, commit_tag: &str) -> bool {
+    pub async fn should_drop_on_commit(
+        &self,
+        pid: Option<u32>,
+        session_tag: Option<&str>,
+        commit_tag: &str,
+    ) -> bool {
         let mut state = self.inner.lock().await;
         let mut should_drop = false;
 
@@ -306,6 +362,11 @@ impl SharedState {
             if rule.action == BarrierAction::DropConnectionOnCommit {
                 if let Some(target_pid) = rule.target_pid
                     && Some(target_pid) != pid
+                {
+                    return true;
+                }
+                if let Some(ref rule_tag) = rule.session_tag
+                    && Some(rule_tag.as_str()) != session_tag
                 {
                     return true;
                 }

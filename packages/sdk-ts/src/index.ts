@@ -3,6 +3,7 @@ import type { Client } from "pg";
 export interface InterceptOptions {
   client?: Client;
   clientPid?: number;
+  sessionTag?: string;
   onQueryMatch: string | RegExp;
   action?:
     | "PAUSE_BEFORE_QUERY"
@@ -50,6 +51,13 @@ export class BarrierHandle {
 export class PgInterleaveClient {
   constructor(private readonly controlUrl = "http://127.0.0.1:9090") {}
 
+  /**
+   * Appends session routing comment to an SQL query for connection pool compatibility
+   */
+  static tag(sql: string, sessionTag: string): string {
+    return `/* interleave: session=${sessionTag} */ ${sql}`;
+  }
+
   async reset(): Promise<void> {
     const res = await fetch(`${this.controlUrl}/reset`, { method: "POST" });
     if (!res.ok) {
@@ -91,6 +99,7 @@ export class PgInterleaveClient {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         target_pid: pid ?? null,
+        session_tag: options.sessionTag ?? null,
         query_pattern: pattern,
         action,
         times: options.times ?? 1,

@@ -16,6 +16,7 @@ use crate::protocol::{
 struct ConnectionState {
     statements: HashMap<String, String>,
     portals: HashMap<String, String>,
+    current_session_tag: Option<String>,
     last_tx_status: u8,
     pending_pause_after: bool,
     response_buffer: Vec<u8>,
@@ -26,6 +27,7 @@ impl ConnectionState {
         Self {
             statements: HashMap::new(),
             portals: HashMap::new(),
+            current_session_tag: None,
             last_tx_status: b'I',
             pending_pause_after: false,
             response_buffer: Vec::new(),
@@ -192,8 +194,9 @@ async fn handle_connection(
 
                                 if m.tag == Some(b'C') {
                                     let payload_str = String::from_utf8_lossy(&m.payload);
+                                    let tag_ref = conn_scope.current_session_tag.as_deref();
                                     if payload_str.starts_with("COMMIT")
-                                        && state.should_drop_on_commit(server_pid, &payload_str).await
+                                        && state.should_drop_on_commit(server_pid, tag_ref, &payload_str).await
                                     {
                                         warn!(conn_id, "CHAOS: Forcing TCP connection drop right after database COMMIT!");
                                         return Ok(());
@@ -214,7 +217,7 @@ async fn handle_connection(
                                             cleanup_state.record_timeout(&b_id).await;
                                             warn!(conn_id, barrier_id = %barrier_id, "PauseAfterResponse barrier timed out! Emitting 57014");
 
-                                            // По таймауту сбрасываем ответ и возвращаем 57014
+                                            // Drop buffered response and emit 57014 on timeout
                                             conn_scope.response_buffer.clear();
                                             let err_msg = PgMessage::build_error_response(
                                                 "57014",
@@ -246,7 +249,7 @@ async fn handle_connection(
         Ok(())
     }.await;
 
-    // Очистка при закрытии соединения
+    // Cleanup connection state on close
     state.cleanup_connection(conn_id, server_pid).await;
     res
 }
@@ -306,7 +309,12 @@ where
     for sql in &executed_sqls {
         info!(conn_id, query = %sql, "-> Inspecting batch query");
 
-        if state.check_deadlock_match(server_pid, sql).await {
+        if let Some(tag) = crate::barrier::extract_session_tag(sql) {
+            conn_scope.current_session_tag = Some(tag);
+        }
+        let tag_ref = conn_scope.current_session_tag.as_deref();
+
+        if state.check_deadlock_match(server_pid, tag_ref, sql).await {
             warn!(conn_id, query = %sql, "CHAOS: Injecting synthetic 40P01 Deadlock, dropping batch");
 
             let err_msg = PgMessage::build_error_response(
@@ -325,13 +333,15 @@ where
         }
 
         if let Some(_rule) = state
-            .check_action_match(server_pid, sql, BarrierAction::PauseAfterResponse)
+            .check_action_match(server_pid, tag_ref, sql, BarrierAction::PauseAfterResponse)
             .await
         {
             conn_scope.pending_pause_after = true;
         }
 
-        if let Some((barrier_id, receiver)) = state.check_and_create_barrier(server_pid, sql).await
+        if let Some((barrier_id, receiver)) = state
+            .check_and_create_barrier(server_pid, tag_ref, sql)
+            .await
         {
             info!(conn_id, barrier_id = %barrier_id, ttl_ms = barrier_ttl_ms, "Waiting for resume command before sending batch...");
             let cleanup_state = state.clone();
