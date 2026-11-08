@@ -193,16 +193,46 @@ await chaos.injectDeadlock({ client, onQueryMatch: /UPDATE seats/ });
 await chaos.hasTimeouts(); // true if any barrier hit its TTL
 ```
 
+### Connection Pool Compatibility (SQL Comment Routing)
+
+When using connection pools (`pg.Pool`, Prisma, Drizzle), physical connections are shared dynamically. You can route interceptor rules using SQL comment tags instead of capturing backend PIDs:
+
+```typescript
+import { Pool } from "pg";
+import { PgInterleaveClient } from "pg-interleave";
+
+const pool = new Pool({
+  connectionString: "postgres://postgres:postgres@127.0.0.1:5433/postgres",
+});
+const chaos = new PgInterleaveClient("http://127.0.0.1:9090");
+
+// 1. Intercept only queries marked with sessionTag "workerA"
+const barrier = await chaos.intercept({
+  sessionTag: "workerA",
+  onQueryMatch: /UPDATE inventory SET stock = stock - 1/,
+});
+
+// 2. Tag query dynamically using the SDK helper
+const taggedSql = PgInterleaveClient.tag(
+  "UPDATE inventory SET stock = stock - 1 WHERE id = 1",
+  "workerA",
+);
+await pool.query(taggedSql);
+
+// 3. Resume when ready
+await barrier.resume();
+```
+
 ## HTTP control plane
 
-| Method and path     | Purpose                                                                                 |
-| ------------------- | --------------------------------------------------------------------------------------- |
-| `POST /intercept`   | Add a rule: `{ query_pattern, target_pid?, action?, times? }`. 400 on an invalid regex. |
-| `GET /barriers`     | IDs of barriers currently held.                                                         |
-| `POST /resume/:id`  | Release one barrier. 404 if unknown.                                                    |
-| `POST /resume-next` | Release the oldest barrier. 404 if none.                                                |
-| `GET /events`       | `{ "had_timeouts": bool }`                                                              |
-| `POST /reset`       | Remove every rule and release every barrier.                                            |
+| Method and path     | Purpose                                                                                               |
+| ------------------- | ----------------------------------------------------------------------------------------------------- |
+| `POST /intercept`   | Add a rule: `{ query_pattern, target_pid?, session_tag?, action?, times? }`. 400 on an invalid regex. |
+| `GET /barriers`     | IDs of barriers currently held.                                                                       |
+| `POST /resume/:id`  | Release one barrier. 404 if unknown.                                                                  |
+| `POST /resume-next` | Release the oldest barrier. 404 if none.                                                              |
+| `GET /events`       | `{ "had_timeouts": bool }`                                                                            |
+| `POST /reset`       | Remove every rule and release every barrier.                                                          |
 
 The control plane has **no authentication**. Keep it on `127.0.0.1`.
 
@@ -211,7 +241,7 @@ The control plane has **no authentication**. Keep it on `127.0.0.1`.
 - **No TLS.** The proxy answers `N` to `SSLRequest` and `GSSENCRequest`, so clients must connect in plaintext (`sslmode=disable`).
 - **Regex on SQL text.** Rules match the statement text with a regular expression, not a parsed AST. Anchor your patterns.
 - **One shared proxy.** State is global. Run test files serially (`vitest --fileParallelism=false`) or call `reset()` between them.
-- **Connection pools.** Without `target_pid`, a rule matches any connection. To control one specific connection, check a client out of the pool and target its PID. Routing by SQL comment is planned, not implemented.
+- **Connection pools.** Without `target_pid` or `sessionTag`, a rule matches any connection. When using pools where physical connections change dynamically, route statements using `sessionTag` and `PgInterleaveClient.tag(...)`.
 - **Only tested with `node-postgres` and `psql`.** Other drivers may exercise paths that have no test yet.
 
 ## Development
