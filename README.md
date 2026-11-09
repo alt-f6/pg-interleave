@@ -22,6 +22,7 @@ pg / any client ──:5433──▶ proxy ──────▶ PostgreSQL :543
   <a href="#what-it-can-do">Capabilities</a> •
   <a href="#sdk">SDK</a> •
   <a href="#schedule-fuzzer-automated-race-condition-discovery">Schedule Fuzzer</a> •
+  <a href="#trace-record--replay">Trace Record & Replay</a> •
   <a href="#http-control-plane">HTTP API</a> •
   <a href="#limitations">Limitations</a>
 </p>
@@ -38,7 +39,7 @@ If your scenario can be written as plain sequential `await`s on two clients, you
 
 ## Install
 
-> Docker images, release binaries and the npm package are published with each GitHub release (latest: **v0.4.0**).
+> Docker images, release binaries and the npm package are published with each GitHub release (latest: **v0.5.0**).
 
 ### 1. Run the proxy
 
@@ -291,6 +292,8 @@ cargo run --release -p pg-interleave-server -- \
 | `--fuzz`              | Enable schedule fuzzing. Off by default.                                             |
 | `--seed <u64>`        | Seed for the pseudo-random generator. If omitted, a random one is chosen and logged. |
 | `--fuzz-max-delay-ms` | Upper bound for a single injected delay, in milliseconds.                            |
+| `--record <path>`     | Record execution schedule / interleavings to a JSON trace file.                      |
+| `--replay <path>`     | Replay execution trace from a previously recorded JSON file.                         |
 
 ### Capabilities & Guarantees
 
@@ -298,6 +301,34 @@ cargo run --release -p pg-interleave-server -- \
 - **Empirical Detection Rate.** Uncovers 100% of uncoordinated read-modify-write anomalies in concurrent transactions under random jitters (validated against empirical lost update test suites).
 - **Latency Cost.** Every delayed query costs up to `--fuzz-max-delay-ms`, so keep the bound small (e.g., 20–30 ms) in CI.
 - **It finds, it does not prove.** Fuzzing samples schedules. A green run means these schedules passed, not that the code is race free. Run it with several seeds or in property-based test matrices.
+
+## Trace Record & Replay
+
+Record complex interleavings or concurrency race schedules discovered by the scheduler / fuzzer, and replay them deterministically in regression tests.
+
+### 1. Record an execution trace
+
+Start the proxy with `--record`:
+
+```bash
+cargo run --release -p pg-interleave-server -- --record trace.json
+```
+
+During testing, save the current trace buffer to disk via the SDK or HTTP Control API:
+
+```typescript
+await chaos.flushTrace();
+```
+
+### 2. Replay a recorded trace
+
+Rerun the test against the captured execution schedule:
+
+```bash
+cargo run --release -p pg-interleave-server -- --replay trace.json
+```
+
+The proxy holds outgoing queries until their turn in the recorded schedule arrives, guaranteeing step-for-step execution parity.
 
 ## HTTP control plane
 

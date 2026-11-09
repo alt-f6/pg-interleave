@@ -1,12 +1,15 @@
 use clap::Parser;
 use std::net::SocketAddr;
-use tracing::{Level, info};
+use std::path::PathBuf;
+use std::sync::Arc;
+use tracing::{Level, error, info};
 use tracing_subscriber::FmtSubscriber;
 
 mod barrier;
 mod control;
 mod protocol;
 mod proxy;
+mod trace;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -34,6 +37,12 @@ struct Args {
 
     #[arg(long, default_value = "50")]
     fuzz_max_delay_ms: u64,
+
+    #[arg(long, conflicts_with = "replay")]
+    record: Option<PathBuf>,
+
+    #[arg(long, conflicts_with = "record")]
+    replay: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -56,7 +65,22 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
-    let state = barrier::SharedState::new(fuzz_seed, args.fuzz_max_delay_ms);
+    let recorder = args.record.map(trace::TraceRecorder::new);
+    let replayer = match args.replay {
+        Some(path) => {
+            let r = trace::TraceReplayer::from_file(&path)?;
+            info!(path = ?path, "Schedule replay ENABLED");
+            Some(Arc::new(r))
+        }
+        None => None,
+    };
+
+    let state = barrier::SharedState::new(
+        fuzz_seed,
+        args.fuzz_max_delay_ms,
+        recorder.clone(),
+        replayer,
+    );
 
     let proxy_handle = {
         let state = state.clone();
@@ -76,9 +100,27 @@ async fn main() -> anyhow::Result<()> {
         args.listen_addr, args.control_addr, args.barrier_ttl_ms
     );
 
-    let (proxy_res, control_res) = tokio::try_join!(proxy_handle, control_handle)?;
-    proxy_res?;
-    control_res?;
+    tokio::select! {
+        res = async {
+            let (proxy_res, control_res) = tokio::try_join!(proxy_handle, control_handle)?;
+            proxy_res?;
+            control_res?;
+            Ok::<(), anyhow::Error>(())
+        } => {
+            if let Err(e) = res {
+                error!("Server exited with error: {:?}", e);
+            }
+        }
+        _ = tokio::signal::ctrl_c() => {
+            info!("Received shutdown signal (Ctrl+C)");
+        }
+    }
+
+    if let Some(rec) = recorder
+        && let Err(err) = rec.flush().await
+    {
+        error!("Failed to flush trace recorder: {:?}", err);
+    }
 
     Ok(())
 }

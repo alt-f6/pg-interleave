@@ -159,6 +159,15 @@ export class PgInterleaveClient {
     }
   }
 
+  async flushTrace(): Promise<void> {
+    const res = await fetch(`${this.controlUrl}/flush-trace`, {
+      method: "POST",
+    });
+    if (!res.ok) {
+      throw new Error(`Failed to flush trace: HTTP ${res.status}`);
+    }
+  }
+
   async injectDeadlock(options: {
     client?: Client;
     clientPid?: number;

@@ -1,3 +1,4 @@
+use crate::trace::{TraceRecorder, TraceReplayer};
 use regex::Regex;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::{BTreeMap, HashMap};
@@ -194,10 +195,17 @@ pub struct BarrierState {
 pub struct SharedState {
     pub inner: Arc<Mutex<BarrierState>>,
     pub barrier_counter: Arc<AtomicU64>,
+    pub recorder: Option<TraceRecorder>,
+    pub replayer: Option<Arc<TraceReplayer>>,
 }
 
 impl SharedState {
-    pub fn new(fuzz_seed: Option<u64>, fuzz_max_delay_ms: u64) -> Self {
+    pub fn new(
+        fuzz_seed: Option<u64>,
+        fuzz_max_delay_ms: u64,
+        recorder: Option<TraceRecorder>,
+        replayer: Option<Arc<TraceReplayer>>,
+    ) -> Self {
         let fuzzer = fuzz_seed.map(|seed| Fuzzer::new(seed, fuzz_max_delay_ms));
         let state = BarrierState {
             fuzzer,
@@ -206,6 +214,33 @@ impl SharedState {
         Self {
             inner: Arc::new(Mutex::new(state)),
             barrier_counter: Arc::new(AtomicU64::new(1)),
+            recorder,
+            replayer,
+        }
+    }
+
+    pub async fn record_step(&self, conn_id: u64, query: &str, params: &[Option<String>]) {
+        if let Some(recorder) = &self.recorder {
+            recorder.record(conn_id, query, params).await;
+        }
+    }
+
+    pub async fn flush_trace(&self) -> anyhow::Result<()> {
+        if let Some(recorder) = &self.recorder {
+            recorder.flush().await?;
+        }
+        Ok(())
+    }
+
+    pub async fn wait_for_replay_turn(&self, conn_id: u64, query: &str) {
+        if let Some(replayer) = &self.replayer {
+            replayer.wait_for_turn(conn_id, query).await;
+        }
+    }
+
+    pub fn advance_replay_step(&self) {
+        if let Some(replayer) = &self.replayer {
+            replayer.advance_step();
         }
     }
 

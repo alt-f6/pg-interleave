@@ -1,0 +1,240 @@
+{
+  "steps": [
+    {
+      "step": 0,
+      "conn_id": 1,
+      "query": "\n            DROP TABLE IF EXISTS replay_bank CASCADE;\n            CREATE TABLE replay_bank (\n              id INT PRIMARY KEY,\n              balance INT NOT NULL\n            );\n            INSERT INTO replay_bank (id, balance) VALUES (1, 100);\n        ",
+      "params": []
+    },
+    {
+      "step": 1,
+      "conn_id": 1,
+      "query": "BEGIN",
+      "params": []
+    },
+    {
+      "step": 2,
+      "conn_id": 2,
+      "query": "BEGIN",
+      "params": []
+    },
+    {
+      "step": 3,
+      "conn_id": 1,
+      "query": "SELECT balance FROM replay_bank WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 4,
+      "conn_id": 2,
+      "query": "SELECT balance FROM replay_bank WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 5,
+      "conn_id": 1,
+      "query": "UPDATE replay_bank SET balance = balance - 10 WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 6,
+      "conn_id": 2,
+      "query": "COMMIT",
+      "params": []
+    },
+    {
+      "step": 7,
+      "conn_id": 1,
+      "query": "UPDATE replay_bank SET balance = balance - 20 WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 8,
+      "conn_id": 2,
+      "query": "COMMIT",
+      "params": []
+    },
+    {
+      "step": 9,
+      "conn_id": 3,
+      "query": "\n      CREATE TABLE IF NOT EXISTS bank_accounts (\n        id INT PRIMARY KEY,\n        balance INT NOT NULL\n      );\n      INSERT INTO bank_accounts (id, balance) VALUES (1, 100)\n      ON CONFLICT (id) DO UPDATE SET balance = 100;\n    ",
+      "params": []
+    },
+    {
+      "step": 10,
+      "conn_id": 3,
+      "query": "BEGIN",
+      "params": []
+    },
+    {
+      "step": 11,
+      "conn_id": 3,
+      "query": "SELECT balance FROM bank_accounts WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 12,
+      "conn_id": 3,
+      "query": "UPDATE bank_accounts SET balance = 80 WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 13,
+      "conn_id": 4,
+      "query": "BEGIN",
+      "params": []
+    },
+    {
+      "step": 14,
+      "conn_id": 4,
+      "query": "SELECT balance FROM bank_accounts WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 15,
+      "conn_id": 4,
+      "query": "UPDATE bank_accounts SET balance = 90 WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 16,
+      "conn_id": 4,
+      "query": "COMMIT",
+      "params": []
+    },
+    {
+      "step": 17,
+      "conn_id": 3,
+      "query": "COMMIT",
+      "params": []
+    },
+    {
+      "step": 18,
+      "conn_id": 4,
+      "query": "SELECT balance FROM bank_accounts WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 19,
+      "conn_id": 5,
+      "query": "\n      CREATE TABLE IF NOT EXISTS bank_accounts (\n        id INT PRIMARY KEY,\n        balance INT NOT NULL\n      );\n      INSERT INTO bank_accounts (id, balance) VALUES (1, 100)\n      ON CONFLICT (id) DO UPDATE SET balance = 100;\n    ",
+      "params": []
+    },
+    {
+      "step": 20,
+      "conn_id": 5,
+      "query": "BEGIN",
+      "params": []
+    },
+    {
+      "step": 21,
+      "conn_id": 5,
+      "query": "SELECT balance FROM bank_accounts WHERE id = 1 FOR UPDATE",
+      "params": []
+    },
+    {
+      "step": 22,
+      "conn_id": 5,
+      "query": "UPDATE bank_accounts SET balance = 80 WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 23,
+      "conn_id": 6,
+      "query": "BEGIN",
+      "params": []
+    },
+    {
+      "step": 24,
+      "conn_id": 6,
+      "query": "SELECT balance FROM bank_accounts WHERE id = 1 FOR UPDATE",
+      "params": []
+    },
+    {
+      "step": 25,
+      "conn_id": 7,
+      "query": "SELECT wait_event_type FROM pg_stat_activity WHERE pid = $1",
+      "params": [
+        "42"
+      ]
+    },
+    {
+      "step": 26,
+      "conn_id": 5,
+      "query": "COMMIT",
+      "params": []
+    },
+    {
+      "step": 27,
+      "conn_id": 6,
+      "query": "UPDATE bank_accounts SET balance = 70 WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 28,
+      "conn_id": 6,
+      "query": "COMMIT",
+      "params": []
+    },
+    {
+      "step": 29,
+      "conn_id": 5,
+      "query": "SELECT balance FROM bank_accounts WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 30,
+      "conn_id": 8,
+      "query": "\n            DROP TABLE IF EXISTS replay_bank CASCADE;\n            CREATE TABLE replay_bank (\n              id INT PRIMARY KEY,\n              balance INT NOT NULL\n            );\n            INSERT INTO replay_bank (id, balance) VALUES (1, 100);\n        ",
+      "params": []
+    },
+    {
+      "step": 31,
+      "conn_id": 8,
+      "query": "BEGIN",
+      "params": []
+    },
+    {
+      "step": 32,
+      "conn_id": 9,
+      "query": "BEGIN",
+      "params": []
+    },
+    {
+      "step": 33,
+      "conn_id": 8,
+      "query": "SELECT balance FROM replay_bank WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 34,
+      "conn_id": 9,
+      "query": "SELECT balance FROM replay_bank WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 35,
+      "conn_id": 8,
+      "query": "UPDATE replay_bank SET balance = balance - 10 WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 36,
+      "conn_id": 9,
+      "query": "COMMIT",
+      "params": []
+    },
+    {
+      "step": 37,
+      "conn_id": 8,
+      "query": "UPDATE replay_bank SET balance = balance - 20 WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 38,
+      "conn_id": 9,
+      "query": "COMMIT",
+      "params": []
+    }
+  ]
+}

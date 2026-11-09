@@ -1,4 +1,3 @@
-# Стейдж сборки бинарника
 FROM rust:alpine AS builder
 RUN apk add --no-cache musl-dev
 
@@ -8,7 +7,6 @@ COPY crates/ crates/
 
 RUN cargo build --release -p pg-interleave-server
 
-# Финальный минимальный образ
 FROM alpine:3.21
 RUN apk add --no-cache ca-certificates tzdata
 

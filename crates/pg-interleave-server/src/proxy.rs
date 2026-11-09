@@ -318,9 +318,13 @@ where
     }
 
     for (sql, params) in &executed_sqls {
-        let session_tag = extract_session_tag(sql);
-
         let is_internal_query = sql.contains("pg_backend_pid");
+
+        if !is_internal_query {
+            state.wait_for_replay_turn(conn_id, sql).await;
+        }
+
+        let session_tag = extract_session_tag(sql);
 
         if !is_internal_query && let Some(fuzz) = fuzzer.as_deref_mut() {
             let delay = fuzz.next_delay();
@@ -328,6 +332,10 @@ where
                 debug!(conn_id, delay_ms = delay, "Deterministic jitter injected");
                 tokio::time::sleep(Duration::from_millis(delay)).await;
             }
+        }
+
+        if !is_internal_query {
+            state.record_step(conn_id, sql, params).await;
         }
 
         info!(conn_id, query = %sql, ?params, "-> Inspecting batch query");
@@ -400,6 +408,12 @@ where
 
     for m in &batch {
         server_write.write_all(&m.to_bytes()).await?;
+    }
+
+    for (sql, _) in &executed_sqls {
+        if !sql.contains("pg_backend_pid") {
+            state.advance_replay_step();
+        }
     }
 
     Ok(())

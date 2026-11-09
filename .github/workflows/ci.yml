@@ -79,15 +79,12 @@ jobs:
 
       - name: Verify libpq / psql extended pipeline with deadlock recovery
         run: |
-          # 1. Сбрасываем правила и барьеры
           curl -s -X POST http://127.0.0.1:9090/reset
 
-          # 2. Ставим правило дедлока ровно на 1 вызов
           curl -s -X POST http://127.0.0.1:9090/intercept \
             -H "Content-Type: application/json" \
             -d '{"query_pattern": "SELECT \\$1::int", "action": "synthetic_deadlock", "times": 1}'
 
-          # 3. Выполняем 3 запроса подряд в одной сессии psql
           OUTPUT=$(PGPASSWORD=postgres psql -h 127.0.0.1 -p 5433 -U postgres -d postgres -v VERBOSITY=verbose 2>&1 << 'EOF'
           SELECT $1::int AS v \bind 1 \g
           SELECT $1::int AS v \bind 2 \g
@@ -97,7 +94,6 @@ jobs:
 
           echo "$OUTPUT"
 
-          # 4. Проверяем наличие ошибки 40P01 и корректные ответы 2 и 3
           echo "$OUTPUT" | grep -q "40P01" || { echo "Missing 40P01 deadlock error"; exit 1; }
           echo "$OUTPUT" | grep -qx " 2" || { echo "Query 2 wrong"; exit 1; }
           echo "$OUTPUT" | grep -qx " 3" || { echo "Query 3 wrong"; exit 1; }

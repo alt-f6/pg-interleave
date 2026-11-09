@@ -52,12 +52,30 @@ pub async fn run_control_server(addr: SocketAddr, state: SharedState) -> anyhow:
         .route("/events", get(events_handler))
         .route("/resume/:barrier_id", post(resume_handler))
         .route("/resume-next", post(resume_next_handler))
+        .route("/flush-trace", post(flush_trace_handler))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     info!("HTTP Control API running at http://{}", addr);
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+async fn flush_trace_handler(State(state): State<SharedState>) -> impl IntoResponse {
+    match state.flush_trace().await {
+        Ok(_) => (
+            StatusCode::OK,
+            Json(StatusResponse {
+                status: "trace_flushed",
+            }),
+        ),
+        Err(_err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(StatusResponse {
+                status: "flush_failed",
+            }),
+        ),
+    }
 }
 
 async fn reset_handler(State(state): State<SharedState>) -> impl IntoResponse {

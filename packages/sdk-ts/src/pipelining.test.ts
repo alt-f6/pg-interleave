@@ -40,7 +40,6 @@ describe("Extended Protocol: Pipelined Execution & Synthetic Deadlock", () => {
       values: [1],
     };
 
-    // 1-й запрос ловит синтетический 40P01
     let caught40P01 = false;
     try {
       await client.query(queryConfig);
@@ -53,7 +52,6 @@ describe("Extended Protocol: Pipelined Execution & Synthetic Deadlock", () => {
     }
     expect(caught40P01).toBe(true);
 
-    // 2-й запрос: повторный вызов того же prepared statement обязан вернуть точные данные (id=1 -> val=10), а не чужой сдвинутый фрейм
     const res2 = await client.query({
       name: "fetch_item",
       text: "SELECT val FROM test_items WHERE id = $1",
@@ -61,7 +59,6 @@ describe("Extended Protocol: Pipelined Execution & Synthetic Deadlock", () => {
     });
     expect(res2.rows[0].val).toBe(10);
 
-    // 3-й запрос: еще одно выполнение с другим параметром (id=2 -> val=20)
     const res3 = await client.query({
       name: "fetch_item",
       text: "SELECT val FROM test_items WHERE id = $1",

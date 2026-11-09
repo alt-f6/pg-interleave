@@ -1,6 +1,6 @@
 [package]
 name = "pg-interleave-server"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 
 [dependencies]
@@ -16,3 +16,4 @@ serde_json = "1.0"
 regex = "1.10"
 proptest = "1.5"
 fastrand = "2.1"
+tempfile = "3"
