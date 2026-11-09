@@ -2,6 +2,11 @@
 
 [![CI](https://github.com/alt-f6/pg-interleave/actions/workflows/ci.yml/badge.svg)](https://github.com/alt-f6/pg-interleave/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![npm version](https://img.shields.io/npm/v/pg-interleave.svg)](https://www.npmjs.com/package/pg-interleave)
+
+<p align="center">
+  <img src="./demo.gif" alt="pg-interleave demo" width="850">
+</p>
 
 A PostgreSQL wire-protocol proxy for **deterministic concurrency tests**.
 
