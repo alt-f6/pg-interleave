@@ -8,3 +8,5 @@ dist/
 EOF.DS_Store
 **/.DS_Store
 
+
+trace.json

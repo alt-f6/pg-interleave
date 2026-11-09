@@ -235,6 +235,1075 @@
       "conn_id": 9,
       "query": "COMMIT",
       "params": []
+    },
+    {
+      "step": 39,
+      "conn_id": 10,
+      "query": "\n            DROP TABLE IF EXISTS replay_bank CASCADE;\n            CREATE TABLE replay_bank (\n              id INT PRIMARY KEY,\n              balance INT NOT NULL\n            );\n            INSERT INTO replay_bank (id, balance) VALUES (1, 100);\n        ",
+      "params": []
+    },
+    {
+      "step": 40,
+      "conn_id": 13,
+      "query": "SELECT $1::int as val",
+      "params": [
+        "999"
+      ]
+    },
+    {
+      "step": 41,
+      "conn_id": 14,
+      "query": "SELECT $1::int as timeout_val",
+      "params": [
+        "888"
+      ]
+    },
+    {
+      "step": 42,
+      "conn_id": 15,
+      "query": "SELECT ($1::int * 2) as doubled",
+      "params": [
+        "5"
+      ]
+    },
+    {
+      "step": 43,
+      "conn_id": 15,
+      "query": "SELECT ($1::int * 2) as doubled",
+      "params": [
+        "10"
+      ]
+    },
+    {
+      "step": 44,
+      "conn_id": 16,
+      "query": "\n      DROP TABLE IF EXISTS params_inventory CASCADE;\n      CREATE TABLE params_inventory (\n        id INT PRIMARY KEY,\n        item_name TEXT NOT NULL,\n        stock INT NOT NULL\n      );\n      INSERT INTO params_inventory (id, item_name, stock) VALUES \n        (1, 'laptop', 10),\n        (2, 'keyboard', 20);\n    ",
+      "params": []
+    },
+    {
+      "step": 45,
+      "conn_id": 16,
+      "query": "UPDATE params_inventory SET stock = stock - $1 WHERE id = $2",
+      "params": [
+        "1",
+        "1"
+      ]
+    },
+    {
+      "step": 46,
+      "conn_id": 16,
+      "query": "UPDATE params_inventory SET stock = stock - $1 WHERE id = $2",
+      "params": [
+        "1",
+        "2"
+      ]
+    },
+    {
+      "step": 47,
+      "conn_id": 16,
+      "query": "SELECT id, stock FROM params_inventory ORDER BY id ASC",
+      "params": []
+    },
+    {
+      "step": 48,
+      "conn_id": 17,
+      "query": "\n      DROP TABLE IF EXISTS params_inventory CASCADE;\n      CREATE TABLE params_inventory (\n        id INT PRIMARY KEY,\n        item_name TEXT NOT NULL,\n        stock INT NOT NULL\n      );\n      INSERT INTO params_inventory (id, item_name, stock) VALUES \n        (1, 'laptop', 10),\n        (2, 'keyboard', 20);\n    ",
+      "params": []
+    },
+    {
+      "step": 49,
+      "conn_id": 17,
+      "query": "UPDATE params_inventory SET stock = stock - $1 WHERE id = $2",
+      "params": [
+        "5",
+        "1"
+      ]
+    },
+    {
+      "step": 50,
+      "conn_id": 18,
+      "query": "SELECT 101",
+      "params": []
+    },
+    {
+      "step": 51,
+      "conn_id": 19,
+      "query": "SELECT 202",
+      "params": []
+    },
+    {
+      "step": 52,
+      "conn_id": 20,
+      "query": "SELECT 303",
+      "params": []
+    },
+    {
+      "step": 53,
+      "conn_id": 21,
+      "query": "\n      CREATE TABLE IF NOT EXISTS test_balance (\n        id INT PRIMARY KEY,\n        amount INT NOT NULL\n      );\n    ",
+      "params": []
+    },
+    {
+      "step": 54,
+      "conn_id": 21,
+      "query": "INSERT INTO test_balance (id, amount) VALUES (1, 100) ON CONFLICT (id) DO UPDATE SET amount = 100",
+      "params": []
+    },
+    {
+      "step": 55,
+      "conn_id": 22,
+      "query": "BEGIN",
+      "params": []
+    },
+    {
+      "step": 56,
+      "conn_id": 23,
+      "query": "BEGIN",
+      "params": []
+    },
+    {
+      "step": 57,
+      "conn_id": 22,
+      "query": "SELECT amount FROM test_balance WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 58,
+      "conn_id": 23,
+      "query": "SELECT amount FROM test_balance WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 59,
+      "conn_id": 22,
+      "query": "UPDATE test_balance SET amount = 90 WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 60,
+      "conn_id": 23,
+      "query": "UPDATE test_balance SET amount = 90 WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 61,
+      "conn_id": 22,
+      "query": "COMMIT",
+      "params": []
+    },
+    {
+      "step": 62,
+      "conn_id": 23,
+      "query": "COMMIT",
+      "params": []
+    },
+    {
+      "step": 63,
+      "conn_id": 21,
+      "query": "SELECT amount FROM test_balance WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 64,
+      "conn_id": 21,
+      "query": "INSERT INTO test_balance (id, amount) VALUES (1, 100) ON CONFLICT (id) DO UPDATE SET amount = 100",
+      "params": []
+    },
+    {
+      "step": 65,
+      "conn_id": 24,
+      "query": "BEGIN",
+      "params": []
+    },
+    {
+      "step": 66,
+      "conn_id": 25,
+      "query": "BEGIN",
+      "params": []
+    },
+    {
+      "step": 67,
+      "conn_id": 25,
+      "query": "SELECT amount FROM test_balance WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 68,
+      "conn_id": 24,
+      "query": "SELECT amount FROM test_balance WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 69,
+      "conn_id": 24,
+      "query": "UPDATE test_balance SET amount = 90 WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 70,
+      "conn_id": 25,
+      "query": "UPDATE test_balance SET amount = 90 WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 71,
+      "conn_id": 24,
+      "query": "COMMIT",
+      "params": []
+    },
+    {
+      "step": 72,
+      "conn_id": 25,
+      "query": "COMMIT",
+      "params": []
+    },
+    {
+      "step": 73,
+      "conn_id": 21,
+      "query": "SELECT amount FROM test_balance WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 74,
+      "conn_id": 21,
+      "query": "INSERT INTO test_balance (id, amount) VALUES (1, 100) ON CONFLICT (id) DO UPDATE SET amount = 100",
+      "params": []
+    },
+    {
+      "step": 75,
+      "conn_id": 26,
+      "query": "BEGIN",
+      "params": []
+    },
+    {
+      "step": 76,
+      "conn_id": 27,
+      "query": "BEGIN",
+      "params": []
+    },
+    {
+      "step": 77,
+      "conn_id": 26,
+      "query": "SELECT amount FROM test_balance WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 78,
+      "conn_id": 27,
+      "query": "SELECT amount FROM test_balance WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 79,
+      "conn_id": 26,
+      "query": "UPDATE test_balance SET amount = 90 WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 80,
+      "conn_id": 27,
+      "query": "UPDATE test_balance SET amount = 90 WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 81,
+      "conn_id": 27,
+      "query": "COMMIT",
+      "params": []
+    },
+    {
+      "step": 82,
+      "conn_id": 26,
+      "query": "COMMIT",
+      "params": []
+    },
+    {
+      "step": 83,
+      "conn_id": 21,
+      "query": "SELECT amount FROM test_balance WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 84,
+      "conn_id": 21,
+      "query": "INSERT INTO test_balance (id, amount) VALUES (1, 100) ON CONFLICT (id) DO UPDATE SET amount = 100",
+      "params": []
+    },
+    {
+      "step": 85,
+      "conn_id": 28,
+      "query": "BEGIN",
+      "params": []
+    },
+    {
+      "step": 86,
+      "conn_id": 29,
+      "query": "BEGIN",
+      "params": []
+    },
+    {
+      "step": 87,
+      "conn_id": 28,
+      "query": "SELECT amount FROM test_balance WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 88,
+      "conn_id": 29,
+      "query": "SELECT amount FROM test_balance WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 89,
+      "conn_id": 29,
+      "query": "UPDATE test_balance SET amount = 90 WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 90,
+      "conn_id": 28,
+      "query": "UPDATE test_balance SET amount = 90 WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 91,
+      "conn_id": 28,
+      "query": "COMMIT",
+      "params": []
+    },
+    {
+      "step": 92,
+      "conn_id": 29,
+      "query": "COMMIT",
+      "params": []
+    },
+    {
+      "step": 93,
+      "conn_id": 21,
+      "query": "SELECT amount FROM test_balance WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 94,
+      "conn_id": 21,
+      "query": "INSERT INTO test_balance (id, amount) VALUES (1, 100) ON CONFLICT (id) DO UPDATE SET amount = 100",
+      "params": []
+    },
+    {
+      "step": 95,
+      "conn_id": 30,
+      "query": "BEGIN",
+      "params": []
+    },
+    {
+      "step": 96,
+      "conn_id": 31,
+      "query": "BEGIN",
+      "params": []
+    },
+    {
+      "step": 97,
+      "conn_id": 30,
+      "query": "SELECT amount FROM test_balance WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 98,
+      "conn_id": 31,
+      "query": "SELECT amount FROM test_balance WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 99,
+      "conn_id": 31,
+      "query": "UPDATE test_balance SET amount = 90 WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 100,
+      "conn_id": 30,
+      "query": "UPDATE test_balance SET amount = 90 WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 101,
+      "conn_id": 31,
+      "query": "COMMIT",
+      "params": []
+    },
+    {
+      "step": 102,
+      "conn_id": 30,
+      "query": "COMMIT",
+      "params": []
+    },
+    {
+      "step": 103,
+      "conn_id": 21,
+      "query": "SELECT amount FROM test_balance WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 104,
+      "conn_id": 21,
+      "query": "INSERT INTO test_balance (id, amount) VALUES (1, 100) ON CONFLICT (id) DO UPDATE SET amount = 100",
+      "params": []
+    },
+    {
+      "step": 105,
+      "conn_id": 32,
+      "query": "BEGIN",
+      "params": []
+    },
+    {
+      "step": 106,
+      "conn_id": 33,
+      "query": "BEGIN",
+      "params": []
+    },
+    {
+      "step": 107,
+      "conn_id": 32,
+      "query": "SELECT amount FROM test_balance WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 108,
+      "conn_id": 33,
+      "query": "SELECT amount FROM test_balance WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 109,
+      "conn_id": 32,
+      "query": "UPDATE test_balance SET amount = 90 WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 110,
+      "conn_id": 33,
+      "query": "UPDATE test_balance SET amount = 90 WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 111,
+      "conn_id": 33,
+      "query": "COMMIT",
+      "params": []
+    },
+    {
+      "step": 112,
+      "conn_id": 32,
+      "query": "COMMIT",
+      "params": []
+    },
+    {
+      "step": 113,
+      "conn_id": 21,
+      "query": "SELECT amount FROM test_balance WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 114,
+      "conn_id": 21,
+      "query": "INSERT INTO test_balance (id, amount) VALUES (1, 100) ON CONFLICT (id) DO UPDATE SET amount = 100",
+      "params": []
+    },
+    {
+      "step": 115,
+      "conn_id": 34,
+      "query": "BEGIN",
+      "params": []
+    },
+    {
+      "step": 116,
+      "conn_id": 35,
+      "query": "BEGIN",
+      "params": []
+    },
+    {
+      "step": 117,
+      "conn_id": 35,
+      "query": "SELECT amount FROM test_balance WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 118,
+      "conn_id": 34,
+      "query": "SELECT amount FROM test_balance WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 119,
+      "conn_id": 35,
+      "query": "UPDATE test_balance SET amount = 90 WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 120,
+      "conn_id": 34,
+      "query": "UPDATE test_balance SET amount = 90 WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 121,
+      "conn_id": 34,
+      "query": "COMMIT",
+      "params": []
+    },
+    {
+      "step": 122,
+      "conn_id": 35,
+      "query": "COMMIT",
+      "params": []
+    },
+    {
+      "step": 123,
+      "conn_id": 21,
+      "query": "SELECT amount FROM test_balance WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 124,
+      "conn_id": 21,
+      "query": "INSERT INTO test_balance (id, amount) VALUES (1, 100) ON CONFLICT (id) DO UPDATE SET amount = 100",
+      "params": []
+    },
+    {
+      "step": 125,
+      "conn_id": 36,
+      "query": "BEGIN",
+      "params": []
+    },
+    {
+      "step": 126,
+      "conn_id": 37,
+      "query": "BEGIN",
+      "params": []
+    },
+    {
+      "step": 127,
+      "conn_id": 36,
+      "query": "SELECT amount FROM test_balance WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 128,
+      "conn_id": 37,
+      "query": "SELECT amount FROM test_balance WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 129,
+      "conn_id": 36,
+      "query": "UPDATE test_balance SET amount = 90 WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 130,
+      "conn_id": 37,
+      "query": "UPDATE test_balance SET amount = 90 WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 131,
+      "conn_id": 37,
+      "query": "COMMIT",
+      "params": []
+    },
+    {
+      "step": 132,
+      "conn_id": 36,
+      "query": "COMMIT",
+      "params": []
+    },
+    {
+      "step": 133,
+      "conn_id": 21,
+      "query": "SELECT amount FROM test_balance WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 134,
+      "conn_id": 21,
+      "query": "INSERT INTO test_balance (id, amount) VALUES (1, 100) ON CONFLICT (id) DO UPDATE SET amount = 100",
+      "params": []
+    },
+    {
+      "step": 135,
+      "conn_id": 38,
+      "query": "BEGIN",
+      "params": []
+    },
+    {
+      "step": 136,
+      "conn_id": 39,
+      "query": "BEGIN",
+      "params": []
+    },
+    {
+      "step": 137,
+      "conn_id": 38,
+      "query": "SELECT amount FROM test_balance WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 138,
+      "conn_id": 39,
+      "query": "SELECT amount FROM test_balance WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 139,
+      "conn_id": 39,
+      "query": "UPDATE test_balance SET amount = 90 WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 140,
+      "conn_id": 38,
+      "query": "UPDATE test_balance SET amount = 90 WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 141,
+      "conn_id": 39,
+      "query": "COMMIT",
+      "params": []
+    },
+    {
+      "step": 142,
+      "conn_id": 38,
+      "query": "COMMIT",
+      "params": []
+    },
+    {
+      "step": 143,
+      "conn_id": 21,
+      "query": "SELECT amount FROM test_balance WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 144,
+      "conn_id": 21,
+      "query": "INSERT INTO test_balance (id, amount) VALUES (1, 100) ON CONFLICT (id) DO UPDATE SET amount = 100",
+      "params": []
+    },
+    {
+      "step": 145,
+      "conn_id": 40,
+      "query": "BEGIN",
+      "params": []
+    },
+    {
+      "step": 146,
+      "conn_id": 41,
+      "query": "BEGIN",
+      "params": []
+    },
+    {
+      "step": 147,
+      "conn_id": 40,
+      "query": "SELECT amount FROM test_balance WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 148,
+      "conn_id": 41,
+      "query": "SELECT amount FROM test_balance WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 149,
+      "conn_id": 40,
+      "query": "UPDATE test_balance SET amount = 90 WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 150,
+      "conn_id": 41,
+      "query": "UPDATE test_balance SET amount = 90 WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 151,
+      "conn_id": 40,
+      "query": "COMMIT",
+      "params": []
+    },
+    {
+      "step": 152,
+      "conn_id": 41,
+      "query": "COMMIT",
+      "params": []
+    },
+    {
+      "step": 153,
+      "conn_id": 21,
+      "query": "SELECT amount FROM test_balance WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 154,
+      "conn_id": 42,
+      "query": "\n      DROP TABLE IF EXISTS inventory CASCADE;\n      CREATE TABLE IF NOT EXISTS inventory (\n        id INT PRIMARY KEY,\n        stock INT NOT NULL\n      );\n      INSERT INTO inventory (id, stock) VALUES (1, 10)\n      ON CONFLICT (id) DO UPDATE SET stock = 10;\n    ",
+      "params": []
+    },
+    {
+      "step": 155,
+      "conn_id": 42,
+      "query": "BEGIN",
+      "params": []
+    },
+    {
+      "step": 156,
+      "conn_id": 42,
+      "query": "/* interleave: session=workerA */ UPDATE inventory SET stock = stock - 1 WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 157,
+      "conn_id": 43,
+      "query": "SELECT stock FROM inventory WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 158,
+      "conn_id": 42,
+      "query": "COMMIT",
+      "params": []
+    },
+    {
+      "step": 159,
+      "conn_id": 42,
+      "query": "SELECT stock FROM inventory WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 160,
+      "conn_id": 44,
+      "query": "\n      CREATE TABLE IF NOT EXISTS accounts (\n        id INT PRIMARY KEY,\n        balance INT NOT NULL\n      );\n      INSERT INTO accounts (id, balance) VALUES (1, 100)\n      ON CONFLICT (id) DO UPDATE SET balance = 100;\n    ",
+      "params": []
+    },
+    {
+      "step": 161,
+      "conn_id": 44,
+      "query": "BEGIN",
+      "params": []
+    },
+    {
+      "step": 162,
+      "conn_id": 44,
+      "query": "UPDATE accounts SET balance = balance - 50 WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 163,
+      "conn_id": 45,
+      "query": "SELECT balance FROM accounts WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 164,
+      "conn_id": 44,
+      "query": "COMMIT",
+      "params": []
+    },
+    {
+      "step": 165,
+      "conn_id": 45,
+      "query": "SELECT balance FROM accounts WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 166,
+      "conn_id": 46,
+      "query": "\n      CREATE TABLE IF NOT EXISTS test_items (\n        id INT PRIMARY KEY,\n        val INT NOT NULL\n      );\n      INSERT INTO test_items (id, val) VALUES (1, 10), (2, 20), (3, 30)\n      ON CONFLICT (id) DO UPDATE SET val = EXCLUDED.val;\n    ",
+      "params": []
+    },
+    {
+      "step": 167,
+      "conn_id": 46,
+      "query": "SELECT val FROM test_items WHERE id = $1",
+      "params": [
+        "1"
+      ]
+    },
+    {
+      "step": 168,
+      "conn_id": 46,
+      "query": "SELECT val FROM test_items WHERE id = $1",
+      "params": [
+        "1"
+      ]
+    },
+    {
+      "step": 169,
+      "conn_id": 46,
+      "query": "SELECT val FROM test_items WHERE id = $1",
+      "params": [
+        "2"
+      ]
+    },
+    {
+      "step": 170,
+      "conn_id": 47,
+      "query": "\n      CREATE TABLE IF NOT EXISTS seats (\n        id INT PRIMARY KEY,\n        reserved BOOLEAN NOT NULL\n      );\n      INSERT INTO seats (id, reserved) VALUES (1, false)\n      ON CONFLICT (id) DO UPDATE SET reserved = false;\n    ",
+      "params": []
+    },
+    {
+      "step": 171,
+      "conn_id": 47,
+      "query": "BEGIN",
+      "params": []
+    },
+    {
+      "step": 172,
+      "conn_id": 47,
+      "query": "UPDATE seats SET reserved = true WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 173,
+      "conn_id": 47,
+      "query": "ROLLBACK",
+      "params": []
+    },
+    {
+      "step": 174,
+      "conn_id": 47,
+      "query": "BEGIN",
+      "params": []
+    },
+    {
+      "step": 175,
+      "conn_id": 47,
+      "query": "UPDATE seats SET reserved = true WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 176,
+      "conn_id": 47,
+      "query": "COMMIT",
+      "params": []
+    },
+    {
+      "step": 177,
+      "conn_id": 47,
+      "query": "SELECT reserved FROM seats WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 178,
+      "conn_id": 49,
+      "query": "\n            CREATE TABLE IF NOT EXISTS orders (\n              id INT PRIMARY KEY,\n              status TEXT NOT NULL\n            );\n            DELETE FROM orders where id = 999;\n        ",
+      "params": []
+    },
+    {
+      "step": 179,
+      "conn_id": 48,
+      "query": "BEGIN",
+      "params": []
+    },
+    {
+      "step": 180,
+      "conn_id": 48,
+      "query": "INSERT INTO orders (id, status) VALUES (999, 'PAID')",
+      "params": []
+    },
+    {
+      "step": 181,
+      "conn_id": 48,
+      "query": "COMMIT",
+      "params": []
+    },
+    {
+      "step": 182,
+      "conn_id": 49,
+      "query": "SELECT * FROM orders WHERE id = 999",
+      "params": []
+    },
+    {
+      "step": 183,
+      "conn_id": 50,
+      "query": "\n      CREATE TABLE IF NOT EXISTS bank_accounts (\n        id INT PRIMARY KEY,\n        balance INT NOT NULL\n      );\n      INSERT INTO bank_accounts (id, balance) VALUES (1, 100)\n      ON CONFLICT (id) DO UPDATE SET balance = 100;\n    ",
+      "params": []
+    },
+    {
+      "step": 184,
+      "conn_id": 50,
+      "query": "BEGIN",
+      "params": []
+    },
+    {
+      "step": 185,
+      "conn_id": 50,
+      "query": "SELECT balance FROM bank_accounts WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 186,
+      "conn_id": 50,
+      "query": "UPDATE bank_accounts SET balance = 80 WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 187,
+      "conn_id": 51,
+      "query": "BEGIN",
+      "params": []
+    },
+    {
+      "step": 188,
+      "conn_id": 51,
+      "query": "SELECT balance FROM bank_accounts WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 189,
+      "conn_id": 51,
+      "query": "UPDATE bank_accounts SET balance = 90 WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 190,
+      "conn_id": 51,
+      "query": "COMMIT",
+      "params": []
+    },
+    {
+      "step": 191,
+      "conn_id": 50,
+      "query": "COMMIT",
+      "params": []
+    },
+    {
+      "step": 192,
+      "conn_id": 51,
+      "query": "SELECT balance FROM bank_accounts WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 193,
+      "conn_id": 52,
+      "query": "\n      CREATE TABLE IF NOT EXISTS bank_accounts (\n        id INT PRIMARY KEY,\n        balance INT NOT NULL\n      );\n      INSERT INTO bank_accounts (id, balance) VALUES (1, 100)\n      ON CONFLICT (id) DO UPDATE SET balance = 100;\n    ",
+      "params": []
+    },
+    {
+      "step": 194,
+      "conn_id": 52,
+      "query": "BEGIN",
+      "params": []
+    },
+    {
+      "step": 195,
+      "conn_id": 52,
+      "query": "SELECT balance FROM bank_accounts WHERE id = 1 FOR UPDATE",
+      "params": []
+    },
+    {
+      "step": 196,
+      "conn_id": 52,
+      "query": "UPDATE bank_accounts SET balance = 80 WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 197,
+      "conn_id": 53,
+      "query": "BEGIN",
+      "params": []
+    },
+    {
+      "step": 198,
+      "conn_id": 53,
+      "query": "SELECT balance FROM bank_accounts WHERE id = 1 FOR UPDATE",
+      "params": []
+    },
+    {
+      "step": 199,
+      "conn_id": 54,
+      "query": "SELECT wait_event_type FROM pg_stat_activity WHERE pid = $1",
+      "params": [
+        "104"
+      ]
+    },
+    {
+      "step": 200,
+      "conn_id": 52,
+      "query": "COMMIT",
+      "params": []
+    },
+    {
+      "step": 201,
+      "conn_id": 53,
+      "query": "UPDATE bank_accounts SET balance = 70 WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 202,
+      "conn_id": 53,
+      "query": "COMMIT",
+      "params": []
+    },
+    {
+      "step": 203,
+      "conn_id": 52,
+      "query": "SELECT balance FROM bank_accounts WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 204,
+      "conn_id": 55,
+      "query": "\n            DROP TABLE IF EXISTS replay_bank CASCADE;\n            CREATE TABLE replay_bank (\n              id INT PRIMARY KEY,\n              balance INT NOT NULL\n            );\n            INSERT INTO replay_bank (id, balance) VALUES (1, 100);\n        ",
+      "params": []
+    },
+    {
+      "step": 205,
+      "conn_id": 55,
+      "query": "BEGIN",
+      "params": []
+    },
+    {
+      "step": 206,
+      "conn_id": 56,
+      "query": "BEGIN",
+      "params": []
+    },
+    {
+      "step": 207,
+      "conn_id": 55,
+      "query": "SELECT balance FROM replay_bank WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 208,
+      "conn_id": 56,
+      "query": "SELECT balance FROM replay_bank WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 209,
+      "conn_id": 55,
+      "query": "UPDATE replay_bank SET balance = balance - 10 WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 210,
+      "conn_id": 56,
+      "query": "COMMIT",
+      "params": []
+    },
+    {
+      "step": 211,
+      "conn_id": 55,
+      "query": "UPDATE replay_bank SET balance = balance - 20 WHERE id = 1",
+      "params": []
+    },
+    {
+      "step": 212,
+      "conn_id": 56,
+      "query": "COMMIT",
+      "params": []
     }
   ]
 }

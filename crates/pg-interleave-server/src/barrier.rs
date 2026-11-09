@@ -254,6 +254,12 @@ impl SharedState {
         state.rules.clear();
         state.client_statements.clear();
         state.had_timeouts = false;
+        drop(state);
+
+        if let Some(recorder) = &self.recorder {
+            recorder.clear().await;
+        }
+
         info!("Barrier state reset successfully");
     }
 

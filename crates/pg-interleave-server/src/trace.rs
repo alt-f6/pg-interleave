@@ -56,6 +56,11 @@ impl TraceRecorder {
         info!(path = ?self.path, count = log.steps.len(), "Trace recording flushed to file");
         Ok(())
     }
+
+    pub async fn clear(&self) {
+        let mut steps = self.steps.lock().await;
+        steps.clear();
+    }
 }
 
 pub struct TraceReplayer {

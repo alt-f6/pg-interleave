@@ -39,7 +39,7 @@ If your scenario can be written as plain sequential `await`s on two clients, you
 
 ## Install
 
-> Docker images, release binaries and the npm package are published with each GitHub release (latest: **v0.5.0**).
+> Docker images, release binaries and the npm package are published with each GitHub release (latest: **v0.5.1**).
 
 ### 1. Run the proxy
 
@@ -338,8 +338,9 @@ The proxy holds outgoing queries until their turn in the recorded schedule arriv
 | `GET /barriers`     | IDs of barriers currently held.                                                                       |
 | `POST /resume/:id`  | Release one barrier. 404 if unknown.                                                                  |
 | `POST /resume-next` | Release the oldest barrier. 404 if none.                                                              |
+| `POST /flush-trace` | Flush current in-memory execution trace to the file specified in `--record`.                          |
 | `GET /events`       | `{ "had_timeouts": bool }`                                                                            |
-| `POST /reset`       | Remove every rule and release every barrier.                                                          |
+| `POST /reset`       | Remove every rule, release every barrier, and clear in-memory trace buffer.                           |
 
 The control plane has **no authentication**. Keep it on `127.0.0.1`.
 
