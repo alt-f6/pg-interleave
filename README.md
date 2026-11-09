@@ -331,8 +331,9 @@ cargo run --release -p pg-interleave-server -- \
 
 - **Per-Connection Reproducibility.** Each client connection receives an independent PRNG stream derived via SplitMix64 from `(base_seed, conn_id)`. Re-running with `--seed <u64>` guarantees reproducible schedule execution without cross-connection lock contention.
 - **Empirical Detection Rate.** When tested against an uncoordinated read-modify-write scenario without artificial in-code sleeps (`examples/lost_update_benchmark.ts`):
-  - Without fuzzer (`TCP_NODELAY` enabled): **0/100** lost updates at 5 ms and 15 ms start offsets (race never manifests naturally).
-  - With schedule fuzzer enabled: **88/100** lost updates detected at 5 ms start offset, and **76/100** at 15 ms start offset.
+  - Without fuzzer (`TCP_NODELAY` enabled): **0–2/100** lost updates at 5 ms and 15 ms start offsets (anomalies rarely manifest naturally due to sub-millisecond query execution).
+  - With schedule fuzzer enabled: **85–96/100** lost updates detected across 5 ms and 15 ms start offsets.
+  - Deterministic replay under fixed seed (`--seed 42`, `--fuzz-max-delay-ms 30`): yields consistent detection counts across repeated benchmark runs.
 
   To reproduce the benchmark figures locally:
 
@@ -340,12 +341,12 @@ cargo run --release -p pg-interleave-server -- \
   # 1. Baseline run (without fuzzer):
   cargo run --release -p pg-interleave-server -- --listen-addr 127.0.0.1:5433
   npx tsx examples/lost_update_benchmark.ts
-  # Output: 0/100 (or ~3-9% due to OS timer jitter)
+  # Output: 0-2/100 (baseline OS scheduling noise)
 
-  # 2. Schedule fuzzer run:
-  cargo run --release -p pg-interleave-server -- --fuzz --fuzz-max-delay-ms 30
+  # 2. Schedule fuzzer run with fixed seed:
+  cargo run --release -p pg-interleave-server -- --fuzz --seed 42 --fuzz-max-delay-ms 30
   npx tsx examples/lost_update_benchmark.ts
-  # Output: ~88-96/100 detected
+  # Output: ~85-92/100 detected
   ```
 
 - **Latency Cost.** Every delayed query costs up to `--fuzz-max-delay-ms`, so keep the bound small (e.g., 20–30 ms) in CI.
@@ -396,7 +397,7 @@ The control plane has **no authentication**. Keep it on `127.0.0.1`.
 ## Limitations
 
 - **No TLS.** The proxy answers `N` to `SSLRequest` and `GSSENCRequest`, so clients must connect in plaintext (`sslmode=disable`).
-- **AST scope.** AST matching supports top-level `SELECT`, `INSERT`, `UPDATE`, `DELETE`, multi-statement query batches, and `WITH` CTEs for `SELECT`. Mutating CTEs (e.g. `WITH u AS (UPDATE ...) SELECT ...`) report the outer query operation; use regex matching (`onQueryMatch`) for targeting mutating CTE statements.
+- **AST scope.** AST matching supports top-level `SELECT`, `INSERT`, `UPDATE`, `DELETE`, multi-statement query batches, and `WITH` CTEs for `SELECT`. Data-modifying CTEs (e.g., `WITH u AS (UPDATE ...) SELECT * FROM u`) do **not** match as `UPDATE` (the outer statement is parsed as `SELECT`); use regex matching (`onQueryMatch`) when targeting mutating CTEs.
 - **One shared proxy.** State is global. Run test files serially (`vitest --fileParallelism=false`) or call `reset()` between them.
 - **Connection pools.** Without `target_pid` or `sessionTag`, a rule matches any connection. When using pools where physical connections change dynamically, route statements using `sessionTag` and `PgInterleaveClient.tag(...)`.
 - **Only tested with `node-postgres` and `psql`.** Other drivers may exercise paths that have no test yet.
