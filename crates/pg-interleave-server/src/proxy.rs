@@ -55,6 +55,7 @@ pub async fn run_proxy(
 
     loop {
         let (client_stream, client_addr) = listener.accept().await?;
+        client_stream.set_nodelay(true)?;
         connection_id += 1;
         let conn_id = connection_id;
         let conn_state = state.clone();
@@ -87,6 +88,7 @@ async fn handle_connection(
         .ok_or_else(|| anyhow::anyhow!("Unable to resolve target address: {}", target_addr))?;
 
     let mut server = TcpStream::connect(target_sock).await?;
+    server.set_nodelay(true)?;
     info!(conn_id, "Established connection to upstream database");
 
     let (mut client_read, mut client_write) = client.split();

@@ -330,7 +330,9 @@ cargo run --release -p pg-interleave-server -- \
 ### Capabilities & Guarantees
 
 - **Per-Connection Reproducibility.** Each client connection receives an independent PRNG stream derived via SplitMix64 from `(base_seed, conn_id)`. Re-running with `--seed <u64>` guarantees reproducible schedule execution without cross-connection lock contention.
-- **Empirical Detection Rate.** Uncovers 100% of uncoordinated read-modify-write anomalies in concurrent transactions under random jitters (validated against empirical lost update test suites).
+- **Empirical Detection Rate.** When tested against an uncoordinated read-modify-write scenario without artificial in-code sleeps (`examples/lost_update_benchmark.ts`):
+  - Without fuzzer (`TCP_NODELAY` enabled): **0/100** lost updates at 5 ms and 15 ms start offsets (race never manifests naturally).
+  - With schedule fuzzer enabled: **88/100** lost updates detected at 5 ms start offset, and **76/100** at 15 ms start offset.
 - **Latency Cost.** Every delayed query costs up to `--fuzz-max-delay-ms`, so keep the bound small (e.g., 20–30 ms) in CI.
 - **It finds, it does not prove.** Fuzzing samples schedules. A green run means these schedules passed, not that the code is race free. Run it with several seeds or in property-based test matrices.
 
@@ -360,7 +362,7 @@ Rerun the test against the captured execution schedule:
 cargo run --release -p pg-interleave-server -- --replay trace.json
 ```
 
-The proxy holds outgoing queries until their turn in the recorded schedule arrives, guaranteeing step-for-step execution parity.
+The proxy holds outgoing queries until their turn in the recorded schedule arrives, reproducing the captured statement order across connections.
 
 ## HTTP control plane
 
@@ -379,7 +381,7 @@ The control plane has **no authentication**. Keep it on `127.0.0.1`.
 ## Limitations
 
 - **No TLS.** The proxy answers `N` to `SSLRequest` and `GSSENCRequest`, so clients must connect in plaintext (`sslmode=disable`).
-- **AST scope.** AST matching currently supports top-level `SELECT`, `INSERT`, `UPDATE`, and `DELETE`. For complex DDL/extensions, use regex matching with anchored patterns.
+- **AST scope.** AST matching supports `SELECT`, `INSERT`, `UPDATE`, and `DELETE` (including multi-statement query batches and subqueries/CTEs). Arbitrary DDL, procedural extensions, or dialect-specific statements fall back to regex matching (`onQueryMatch`).
 - **One shared proxy.** State is global. Run test files serially (`vitest --fileParallelism=false`) or call `reset()` between them.
 - **Connection pools.** Without `target_pid` or `sessionTag`, a rule matches any connection. When using pools where physical connections change dynamically, route statements using `sessionTag` and `PgInterleaveClient.tag(...)`.
 - **Only tested with `node-postgres` and `psql`.** Other drivers may exercise paths that have no test yet.

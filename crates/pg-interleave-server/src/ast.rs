@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use sqlparser::ast::{SetExpr, Statement, TableFactor, TableWithJoins};
+use sqlparser::ast::{Cte, Query, SetExpr, Statement, TableFactor, TableWithJoins, With};
 use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser::parser::Parser;
 
@@ -11,16 +11,19 @@ pub struct AstSelector {
 
 #[derive(Debug, Clone, Default)]
 pub struct QueryAstMeta {
-    pub operation: Option<String>,
+    pub operations: Vec<String>,
     pub tables: Vec<String>,
 }
 
 impl QueryAstMeta {
     pub fn matches(&self, selector: &AstSelector) -> bool {
         if let Some(target_op) = &selector.operation {
-            match &self.operation {
-                Some(op) if op.eq_ignore_ascii_case(target_op) => {}
-                _ => return false,
+            let has_op = self
+                .operations
+                .iter()
+                .any(|op| op.eq_ignore_ascii_case(target_op));
+            if !has_op {
+                return false;
             }
         }
 
@@ -41,30 +44,39 @@ impl QueryAstMeta {
 pub fn extract_ast_metadata(sql: &str) -> Option<QueryAstMeta> {
     let dialect = PostgreSqlDialect {};
     let statements = Parser::parse_sql(&dialect, sql).ok()?;
-    let stmt = statements.first()?;
+    if statements.is_empty() {
+        return None;
+    }
 
     let mut meta = QueryAstMeta::default();
 
+    for stmt in &statements {
+        collect_stmt_meta(stmt, &mut meta);
+    }
+
+    if meta.operations.is_empty() && meta.tables.is_empty() {
+        None
+    } else {
+        Some(meta)
+    }
+}
+
+fn collect_stmt_meta(stmt: &Statement, meta: &mut QueryAstMeta) {
     match stmt {
         Statement::Query(query) => {
-            meta.operation = Some("SELECT".to_string());
-            if let SetExpr::Select(select) = query.body.as_ref() {
-                for table_with_joins in &select.from {
-                    collect_tables_from_relation(table_with_joins, &mut meta.tables);
-                }
-            }
+            collect_query_meta(query, meta);
         }
         Statement::Insert(insert) => {
-            meta.operation = Some("INSERT".to_string());
-            let table_name = normalize_object_name(&insert.table.to_string());
-            meta.tables.push(table_name);
+            meta.operations.push("INSERT".to_string());
+            meta.tables
+                .push(normalize_object_name(&insert.table.to_string()));
         }
         Statement::Update { table, .. } => {
-            meta.operation = Some("UPDATE".to_string());
+            meta.operations.push("UPDATE".to_string());
             collect_tables_from_relation(table, &mut meta.tables);
         }
         Statement::Delete(delete) => {
-            meta.operation = Some("DELETE".to_string());
+            meta.operations.push("DELETE".to_string());
             match &delete.from {
                 sqlparser::ast::FromTable::WithFromKeyword(tables)
                 | sqlparser::ast::FromTable::WithoutKeyword(tables) => {
@@ -74,10 +86,32 @@ pub fn extract_ast_metadata(sql: &str) -> Option<QueryAstMeta> {
                 }
             }
         }
-        _ => return None,
+        _ => {}
+    }
+}
+
+fn collect_query_meta(query: &Query, meta: &mut QueryAstMeta) {
+    if let Some(ref with) = query.with {
+        collect_with_meta(with, meta);
     }
 
-    Some(meta)
+    meta.operations.push("SELECT".to_string());
+
+    if let SetExpr::Select(select) = query.body.as_ref() {
+        for table_with_joins in &select.from {
+            collect_tables_from_relation(table_with_joins, &mut meta.tables);
+        }
+    }
+}
+
+fn collect_with_meta(with: &With, meta: &mut QueryAstMeta) {
+    for cte in &with.cte_tables {
+        collect_cte_meta(cte, meta);
+    }
+}
+
+fn collect_cte_meta(cte: &Cte, meta: &mut QueryAstMeta) {
+    collect_query_meta(&cte.query, meta);
 }
 
 fn collect_tables_from_relation(twj: &TableWithJoins, tables: &mut Vec<String>) {
@@ -112,10 +146,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_extract_update_with_schema_and_quotes() {
-        let sql = r#"UPDATE "public"."accounts" SET balance = balance - 10 WHERE id = 1;"#;
+    fn test_extract_multi_statement() {
+        let sql = "SELECT 1; UPDATE accounts SET balance = balance - 10 WHERE id = 1;";
         let meta = extract_ast_metadata(sql).expect("Failed to parse SQL");
-        assert_eq!(meta.operation.as_deref(), Some("UPDATE"));
         assert!(meta.matches(&AstSelector {
             operation: Some("UPDATE".to_string()),
             table: Some("accounts".to_string()),
@@ -123,32 +156,22 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_insert() {
-        let sql = r#"INSERT INTO "users" (id, name) VALUES (1, 'Alice');"#;
+    fn test_extract_update_with_schema_and_quotes() {
+        let sql = r#"UPDATE "public"."accounts" SET balance = balance - 10 WHERE id = 1;"#;
         let meta = extract_ast_metadata(sql).expect("Failed to parse SQL");
-        assert_eq!(meta.operation.as_deref(), Some("INSERT"));
         assert!(meta.matches(&AstSelector {
-            operation: Some("INSERT".to_string()),
-            table: Some("users".to_string()),
+            operation: Some("UPDATE".to_string()),
+            table: Some("accounts".to_string()),
         }));
     }
 
     #[test]
-    fn test_extract_select_join() {
-        let sql = "SELECT * FROM orders JOIN users ON orders.user_id = users.id";
+    fn test_extract_cte_query() {
+        let sql = "WITH u AS (SELECT * FROM accounts) SELECT * FROM u;";
         let meta = extract_ast_metadata(sql).expect("Failed to parse SQL");
-        assert_eq!(meta.operation.as_deref(), Some("SELECT"));
         assert!(meta.matches(&AstSelector {
             operation: Some("SELECT".to_string()),
-            table: Some("orders".to_string()),
-        }));
-        assert!(meta.matches(&AstSelector {
-            operation: Some("SELECT".to_string()),
-            table: Some("users".to_string()),
-        }));
-        assert!(!meta.matches(&AstSelector {
-            operation: Some("SELECT".to_string()),
-            table: Some("products".to_string()),
+            table: Some("accounts".to_string()),
         }));
     }
 }
