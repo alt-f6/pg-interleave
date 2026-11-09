@@ -127,4 +127,104 @@ describe("pg-boss Concurrency & Fault Tolerance via pg-interleave", () => {
 
     await boss.stop({ graceful: false });
   }, 15_000);
+
+  it("stress: handles 50 concurrent jobs under active schedule fuzzing without race conditions", async () => {
+    const boss = new PgBoss({
+      connectionString: PROXY_URL,
+      schema: "pgboss",
+      max: 10,
+    });
+
+    await boss.start();
+
+    const queue = "fuzz-stress-queue";
+    await boss.createQueue(queue);
+
+    const executions = new Map<string, number>();
+
+    await boss.work(
+      queue,
+      { batchSize: 5, pollingIntervalSeconds: 0.5 },
+      async (jobs: any) => {
+        const list = Array.isArray(jobs) ? jobs : [jobs];
+        for (const job of list) {
+          const current = executions.get(job.id) || 0;
+          executions.set(job.id, current + 1);
+          await new Promise((r) => setTimeout(r, Math.random() * 20));
+        }
+      }
+    );
+
+    for (let i = 0; i < 50; i++) {
+      await boss.send(queue, { index: i });
+    }
+
+    const start = Date.now();
+    while (executions.size < 50 && Date.now() - start < 25_000) {
+      await new Promise((r) => setTimeout(r, 200));
+    }
+
+    await boss.stop({ graceful: true });
+
+    expect(executions.size).toBe(50);
+    for (const [id, count] of executions.entries()) {
+      expect(count, `Job ${id} had duplicate execution!`).toBe(1);
+    }
+  }, 35_000);
+
+  it("verifies task remains in 'created' state while worker acquisition is held by proxy", async () => {
+    const boss = new PgBoss({
+      connectionString: PROXY_URL,
+      schema: "pgboss",
+      expireInSeconds: 5,
+    });
+
+    await boss.start();
+
+    const queue = "zombie-recovery-queue";
+    await boss.createQueue(queue);
+
+    // Перехватываем первый UPDATE воркера (попытку перевести задачу в active)
+    const barrier = await chaos.intercept({
+      onQueryMatch: /UPDATE.*job/i,
+      action: "pause_before_query",
+      times: 1,
+    });
+
+    await boss.work(
+      queue,
+      { batchSize: 1, pollingIntervalSeconds: 0.5 },
+      async () => {
+        // Воркер выполняет логику
+      }
+    );
+
+    const jobId = await boss.send(queue, { payload: "critical_data" });
+
+    // Ждём, пока прокси перехватит запрос захвата задачи воркером
+    await barrier.wait();
+
+    // Проверяем: пока запрос висит в барьере прокси, в БД задача строго 'created' (воркер её ещё не получил)
+    const midRes = await adminClient.query(
+      "SELECT state, retry_count FROM pgboss.job WHERE id = $1",
+      [jobId]
+    );
+    console.log("[pg-boss exploration] State while acquisition is frozen in proxy:", midRes.rows[0]?.state);
+    expect(midRes.rows[0]?.state).toBe("created");
+
+    // Отпускаем барьер — разрешаем UPDATE дойти до PostgreSQL
+    await barrier.resume();
+
+    // Ждём завершения задачи
+    await new Promise((r) => setTimeout(r, 1500));
+
+    const finalRes = await adminClient.query(
+      "SELECT state, retry_count FROM pgboss.job WHERE id = $1",
+      [jobId]
+    );
+    console.log("[pg-boss exploration] Final state after resume:", finalRes.rows[0]?.state);
+    expect(finalRes.rows[0]?.state).toBe("completed");
+
+    await boss.stop({ graceful: true });
+  }, 20_000);
 });
