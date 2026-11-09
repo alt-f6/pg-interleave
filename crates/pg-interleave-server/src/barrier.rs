@@ -1,3 +1,4 @@
+use crate::ast::{AstSelector, extract_ast_metadata};
 use crate::trace::{TraceRecorder, TraceReplayer};
 use regex::Regex;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -26,8 +27,9 @@ pub struct InterceptRule {
     pub target_pid: Option<u32>,
     pub session_tag: Option<String>,
     #[allow(dead_code)]
-    pub query_pattern: String,
-    pub compiled_regex: Regex,
+    pub query_pattern: Option<String>,
+    pub compiled_regex: Option<Regex>,
+    pub ast_selector: Option<AstSelector>,
     pub with_params: Option<Vec<serde_json::Value>>,
     pub action: BarrierAction,
     pub times: Option<u32>,
@@ -39,8 +41,10 @@ pub struct InterceptRuleInput {
     pub target_pid: Option<u32>,
     #[serde(alias = "sessionTag", alias = "session_tag", alias = "session")]
     pub session_tag: Option<String>,
-    #[serde(alias = "queryPattern", alias = "onQueryMatch")]
-    pub query_pattern: String,
+    #[serde(alias = "queryPattern", alias = "onQueryMatch", default)]
+    pub query_pattern: Option<String>,
+    #[serde(default)]
+    pub ast: Option<AstSelector>,
     #[serde(alias = "withParams", alias = "with_params", default)]
     pub with_params: Option<Vec<serde_json::Value>>,
     pub action: BarrierAction,
@@ -53,19 +57,49 @@ fn default_times() -> Option<u32> {
 }
 
 impl TryFrom<InterceptRuleInput> for InterceptRule {
-    type Error = regex::Error;
+    type Error = String;
 
     fn try_from(input: InterceptRuleInput) -> Result<Self, Self::Error> {
-        let compiled_regex = Regex::new(&input.query_pattern)?;
+        if input.query_pattern.is_none() && input.ast.is_none() {
+            return Err("Either 'query_pattern' or 'ast' must be provided".to_string());
+        }
+
+        let compiled_regex = match &input.query_pattern {
+            Some(pat) => Some(Regex::new(pat).map_err(|e| e.to_string())?),
+            None => None,
+        };
+
         Ok(Self {
             target_pid: input.target_pid,
             session_tag: input.session_tag,
             query_pattern: input.query_pattern,
             compiled_regex,
+            ast_selector: input.ast,
             with_params: input.with_params,
             action: input.action,
             times: input.times,
         })
+    }
+}
+
+impl InterceptRule {
+    pub fn matches_query(&self, query: &str) -> bool {
+        if let Some(ref re) = self.compiled_regex
+            && !re.is_match(query)
+        {
+            return false;
+        }
+
+        if let Some(ref ast_sel) = self.ast_selector {
+            let matches = extract_ast_metadata(query)
+                .map(|meta| meta.matches(ast_sel))
+                .unwrap_or(false);
+            if !matches {
+                return false;
+            }
+        }
+
+        true
     }
 }
 
@@ -116,6 +150,7 @@ pub fn matches_params(expected: Option<&[serde_json::Value]>, actual: &[Option<S
             (serde_json::Value::String(s), _) if s == "*" => continue,
             (serde_json::Value::Null, None) => continue,
             (serde_json::Value::String(s), Some(a)) if s == a => continue,
+            (serde_json::Value::Number(n), Some(a)) if &n.to_string() == a => continue,
             (serde_json::Value::Bool(b), Some(a)) => {
                 let short = if *b { "t" } else { "f" };
                 if *a == b.to_string() || *a == short {
@@ -309,7 +344,7 @@ impl SharedState {
             if !matches_params(rule.with_params.as_deref(), params) {
                 continue;
             }
-            if rule.compiled_regex.is_match(query) {
+            if rule.matches_query(query) {
                 matched_index = Some(idx);
                 break;
             }
@@ -361,7 +396,7 @@ impl SharedState {
             if !matches_params(rule.with_params.as_deref(), params) {
                 continue;
             }
-            if rule.compiled_regex.is_match(query) {
+            if rule.matches_query(query) {
                 matched_index = Some(idx);
                 break;
             }
@@ -430,7 +465,7 @@ impl SharedState {
             if !matches_params(rule.with_params.as_deref(), params) {
                 continue;
             }
-            if rule.compiled_regex.is_match(query) {
+            if rule.matches_query(query) {
                 matched_index = Some(idx);
                 break;
             }
@@ -465,8 +500,9 @@ impl SharedState {
         let dummy_rule = InterceptRule {
             target_pid: None,
             session_tag: None,
-            query_pattern: "manual".to_string(),
-            compiled_regex: Regex::new(".*").unwrap(),
+            query_pattern: Some("manual".to_string()),
+            compiled_regex: Regex::new(".*").ok(),
+            ast_selector: None,
             with_params: None,
             action: BarrierAction::PauseAfterResponse,
             times: Some(1),
@@ -505,7 +541,7 @@ impl SharedState {
                 {
                     return true;
                 }
-                if rule.compiled_regex.is_match(commit_tag) {
+                if rule.matches_query(commit_tag) {
                     should_drop = true;
                     if let Some(ref mut count) = rule.times {
                         *count = count.saturating_sub(1);

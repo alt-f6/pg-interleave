@@ -5,6 +5,7 @@ use std::sync::Arc;
 use tracing::{Level, error, info};
 use tracing_subscriber::FmtSubscriber;
 
+mod ast;
 mod barrier;
 mod control;
 mod protocol;

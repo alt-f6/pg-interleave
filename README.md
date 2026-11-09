@@ -44,7 +44,7 @@ If your scenario can be written as plain sequential `await`s on two clients, you
 
 ## Install
 
-> Docker images, release binaries and the npm package are published with each GitHub release (latest: **v0.5.1**).
+> Docker images, release binaries and the npm package are published with each GitHub release (latest: **v0.6.0**).
 
 ### 1. Run the proxy
 
@@ -266,6 +266,33 @@ await chaos.intercept({
 });
 ```
 
+### Structural AST Query Selectors
+
+Match queries structurally using AST parsing (`sqlparser-rs`) instead of brittle regexes:
+
+```typescript
+// Freezes the query matching operation and table, regardless of SQL syntax formatting
+const barrier = await chaos.intercept({
+  client,
+  ast: {
+    operation: "UPDATE",
+    table: "accounts",
+  },
+});
+
+// Matches regardless of quotes, newlines, or schema prefixes:
+await client.query(`
+  UPDATE "public"."accounts"
+  SET balance = balance - 20
+  WHERE id = 1
+`);
+
+await barrier.wait();
+await barrier.resume();
+```
+
+Supported operations: SELECT, INSERT, UPDATE, DELETE.
+
 ## Schedule fuzzer (Automated Race Condition Discovery)
 
 `pg-interleave` can inject deterministic, per-connection micro-jitters into incoming queries (including `BEGIN` and `COMMIT`), uncovering latent concurrency bugs such as **Lost Updates** and race conditions without manual intercept rules.
@@ -337,22 +364,22 @@ The proxy holds outgoing queries until their turn in the recorded schedule arriv
 
 ## HTTP control plane
 
-| Method and path     | Purpose                                                                                               |
-| ------------------- | ----------------------------------------------------------------------------------------------------- |
-| `POST /intercept`   | Add a rule: `{ query_pattern, target_pid?, session_tag?, action?, times? }`. 400 on an invalid regex. |
-| `GET /barriers`     | IDs of barriers currently held.                                                                       |
-| `POST /resume/:id`  | Release one barrier. 404 if unknown.                                                                  |
-| `POST /resume-next` | Release the oldest barrier. 404 if none.                                                              |
-| `POST /flush-trace` | Flush current in-memory execution trace to the file specified in `--record`.                          |
-| `GET /events`       | `{ "had_timeouts": bool }`                                                                            |
-| `POST /reset`       | Remove every rule, release every barrier, and clear in-memory trace buffer.                           |
+| Method and path     | Purpose                                                                                                                                         |
+| ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `POST /intercept`   | Add a rule: `{ query_pattern?, ast?: { operation?, table? }, target_pid?, session_tag?, with_params?, action?, times? }`. 400 on invalid regex. |
+| `GET /barriers`     | IDs of barriers currently held.                                                                                                                 |
+| `POST /resume/:id`  | Release one barrier. 404 if unknown.                                                                                                            |
+| `POST /resume-next` | Release the oldest barrier. 404 if none.                                                                                                        |
+| `POST /flush-trace` | Flush current in-memory execution trace to the file specified in `--record`.                                                                    |
+| `GET /events`       | `{ "had_timeouts": bool }`                                                                                                                      |
+| `POST /reset`       | Remove every rule, release every barrier, and clear in-memory trace buffer.                                                                     |
 
 The control plane has **no authentication**. Keep it on `127.0.0.1`.
 
 ## Limitations
 
 - **No TLS.** The proxy answers `N` to `SSLRequest` and `GSSENCRequest`, so clients must connect in plaintext (`sslmode=disable`).
-- **Regex on SQL text.** Rules match the statement text with a regular expression, not a parsed AST. Anchor your patterns.
+- **AST scope.** AST matching currently supports top-level `SELECT`, `INSERT`, `UPDATE`, and `DELETE`. For complex DDL/extensions, use regex matching with anchored patterns.
 - **One shared proxy.** State is global. Run test files serially (`vitest --fileParallelism=false`) or call `reset()` between them.
 - **Connection pools.** Without `target_pid` or `sessionTag`, a rule matches any connection. When using pools where physical connections change dynamically, route statements using `sessionTag` and `PgInterleaveClient.tag(...)`.
 - **Only tested with `node-postgres` and `psql`.** Other drivers may exercise paths that have no test yet.

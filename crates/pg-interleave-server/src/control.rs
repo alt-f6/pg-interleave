@@ -33,8 +33,10 @@ struct RawInterceptRequest {
     target_pid: Option<u32>,
     #[serde(alias = "sessionTag", alias = "session_tag", alias = "session")]
     session_tag: Option<String>,
-    #[serde(alias = "queryPattern", alias = "onQueryMatch")]
-    query_pattern: String,
+    #[serde(alias = "queryPattern", alias = "onQueryMatch", default)]
+    query_pattern: Option<String>,
+    #[serde(default)]
+    ast: Option<crate::ast::AstSelector>,
     #[serde(alias = "withParams", alias = "with_params")]
     with_params: Option<Vec<serde_json::Value>>,
     action: Option<crate::barrier::BarrierAction>,
@@ -95,6 +97,7 @@ async fn intercept_handler(
         target_pid: payload.target_pid,
         session_tag: payload.session_tag,
         query_pattern: payload.query_pattern,
+        ast: payload.ast,
         with_params: payload.with_params,
         action,
         times: payload.times.or(Some(1)),

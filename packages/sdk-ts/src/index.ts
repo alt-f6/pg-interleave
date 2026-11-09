@@ -1,16 +1,36 @@
 import type { Client } from "pg";
 
+export type SqlOperation =
+  | "SELECT"
+  | "INSERT"
+  | "UPDATE"
+  | "DELETE"
+  | "select"
+  | "insert"
+  | "update"
+  | "delete";
+
+export interface AstSelector {
+  operation?: SqlOperation;
+  table?: string;
+}
+
+export type BarrierAction =
+  | "PAUSE_BEFORE_QUERY"
+  | "PAUSE_AFTER_RESPONSE"
+  | "pause_before_query"
+  | "pause_after_response";
+
+export type ParamValue = string | number | boolean | null;
+
 export interface InterceptOptions {
   client?: Client;
   clientPid?: number;
   sessionTag?: string;
-  onQueryMatch: string | RegExp;
-  withParams?: Array<string | number | boolean | null>;
-  action?:
-    | "PAUSE_BEFORE_QUERY"
-    | "PAUSE_AFTER_RESPONSE"
-    | "pause_before_query"
-    | "pause_after_response";
+  onQueryMatch?: RegExp | string;
+  ast?: AstSelector;
+  withParams?: (ParamValue | "*")[];
+  action?: BarrierAction;
   times?: number;
 }
 
@@ -52,9 +72,6 @@ export class BarrierHandle {
 export class PgInterleaveClient {
   constructor(private readonly controlUrl = "http://127.0.0.1:9090") {}
 
-  /**
-   * Appends session routing comment to an SQL query for connection pool compatibility
-   */
   static tag(sql: string, sessionTag: string): string {
     return `/* interleave: session=${sessionTag} */ ${sql}`;
   }
@@ -66,7 +83,7 @@ export class PgInterleaveClient {
     }
   }
 
-  async resumeNext(): Promise<{ status: string, barrier_id?: string }> {
+  async resumeNext(): Promise<{ status: string; barrier_id?: string }> {
     const res = await fetch(`${this.controlUrl}/resume-next`, {
       method: "POST",
     });
@@ -99,38 +116,43 @@ export class PgInterleaveClient {
   }
 
   async intercept(options: InterceptOptions): Promise<BarrierHandle> {
+    if (!options.onQueryMatch && !options.ast) {
+      throw new Error("Either 'onQueryMatch' or 'ast' selector must be provided");
+    }
+
     let pid = options.clientPid;
     if (!pid && options.client) {
       pid = await this.getPid(options.client);
     }
 
-    const pattern =
-      typeof options.onQueryMatch === "string"
-        ? options.onQueryMatch
-        : options.onQueryMatch.source;
-
-    const action = options.action
-      ? options.action.toLowerCase()
-      : "pause_before_query";
-
-    const serializedParams = options.withParams !== undefined
-      ? options.withParams.map((p) => (p === null || p === undefined ? null : String(p)))
-      : undefined;
-
-    const body: Record<string, unknown> = {
-      query_pattern: pattern,
-      action,
+    const payload: Record<string, unknown> = {
+      targetPid: pid,
+      sessionTag: options.sessionTag,
+      action: options.action ?? "pause_before_query",
       times: options.times ?? 1,
     };
 
-    if (pid !== undefined) body.target_pid = pid;
-    if (options.sessionTag !== undefined) body.session_tag = options.sessionTag;
-    if (serializedParams !== undefined) body.with_params = serializedParams;
+    if (options.onQueryMatch) {
+      payload.queryPattern =
+        typeof options.onQueryMatch === "string"
+          ? options.onQueryMatch
+          : options.onQueryMatch.source;
+    }
+
+    if (options.ast) {
+      payload.ast = options.ast;
+    }
+
+    if (options.withParams) {
+      payload.withParams = options.withParams.map((p) =>
+        typeof p === "number" ? String(p) : p
+      );
+    }
 
     const res = await fetch(`${this.controlUrl}/intercept`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
+      body: JSON.stringify(payload),
     });
 
     if (!res.ok) {
