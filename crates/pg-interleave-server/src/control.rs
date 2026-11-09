@@ -25,6 +25,7 @@ struct ResumeResponse {
 #[derive(Serialize)]
 struct EventsResponse {
     had_timeouts: bool,
+    fuzzer_enabled: bool,
 }
 
 #[derive(Deserialize)]
@@ -125,7 +126,11 @@ async fn list_barriers_handler(State(state): State<SharedState>) -> impl IntoRes
 
 async fn events_handler(State(state): State<SharedState>) -> impl IntoResponse {
     let had_timeouts = state.has_timeouts().await;
-    Json(EventsResponse { had_timeouts })
+    let fuzzer_enabled = state.fuzzer().await.is_some();
+    Json(EventsResponse {
+        had_timeouts,
+        fuzzer_enabled,
+    })
 }
 
 async fn resume_handler(

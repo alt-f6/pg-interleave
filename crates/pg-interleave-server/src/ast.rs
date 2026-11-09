@@ -95,9 +95,8 @@ fn collect_query_meta(query: &Query, meta: &mut QueryAstMeta) {
         collect_with_meta(with, meta);
     }
 
-    meta.operations.push("SELECT".to_string());
-
     if let SetExpr::Select(select) = query.body.as_ref() {
+        meta.operations.push("SELECT".to_string());
         for table_with_joins in &select.from {
             collect_tables_from_relation(table_with_joins, &mut meta.tables);
         }

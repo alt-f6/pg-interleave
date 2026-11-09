@@ -44,7 +44,7 @@ If your scenario can be written as plain sequential `await`s on two clients, you
 
 ## Install
 
-> Docker images, release binaries and the npm package are published with each GitHub release (latest: **v0.6.2**).
+> Docker images, release binaries and the npm package are published with each GitHub release (latest: **v0.6.3**).
 
 ### 1. Run the proxy
 
@@ -333,6 +333,21 @@ cargo run --release -p pg-interleave-server -- \
 - **Empirical Detection Rate.** When tested against an uncoordinated read-modify-write scenario without artificial in-code sleeps (`examples/lost_update_benchmark.ts`):
   - Without fuzzer (`TCP_NODELAY` enabled): **0/100** lost updates at 5 ms and 15 ms start offsets (race never manifests naturally).
   - With schedule fuzzer enabled: **88/100** lost updates detected at 5 ms start offset, and **76/100** at 15 ms start offset.
+
+  To reproduce the benchmark figures locally:
+
+  ```bash
+  # 1. Baseline run (without fuzzer):
+  cargo run --release -p pg-interleave-server -- --listen-addr 127.0.0.1:5433
+  npx tsx examples/lost_update_benchmark.ts
+  # Output: 0/100 (or ~3-9% due to OS timer jitter)
+
+  # 2. Schedule fuzzer run:
+  cargo run --release -p pg-interleave-server -- --fuzz --fuzz-max-delay-ms 30
+  npx tsx examples/lost_update_benchmark.ts
+  # Output: ~88-96/100 detected
+  ```
+
 - **Latency Cost.** Every delayed query costs up to `--fuzz-max-delay-ms`, so keep the bound small (e.g., 20–30 ms) in CI.
 - **It finds, it does not prove.** Fuzzing samples schedules. A green run means these schedules passed, not that the code is race free. Run it with several seeds or in property-based test matrices.
 
@@ -381,7 +396,7 @@ The control plane has **no authentication**. Keep it on `127.0.0.1`.
 ## Limitations
 
 - **No TLS.** The proxy answers `N` to `SSLRequest` and `GSSENCRequest`, so clients must connect in plaintext (`sslmode=disable`).
-- **AST scope.** AST matching supports `SELECT`, `INSERT`, `UPDATE`, and `DELETE` (including multi-statement query batches and subqueries/CTEs). Arbitrary DDL, procedural extensions, or dialect-specific statements fall back to regex matching (`onQueryMatch`).
+- **AST scope.** AST matching supports top-level `SELECT`, `INSERT`, `UPDATE`, `DELETE`, multi-statement query batches, and `WITH` CTEs for `SELECT`. Mutating CTEs (e.g. `WITH u AS (UPDATE ...) SELECT ...`) report the outer query operation; use regex matching (`onQueryMatch`) for targeting mutating CTE statements.
 - **One shared proxy.** State is global. Run test files serially (`vitest --fileParallelism=false`) or call `reset()` between them.
 - **Connection pools.** Without `target_pid` or `sessionTag`, a rule matches any connection. When using pools where physical connections change dynamically, route statements using `sessionTag` and `PgInterleaveClient.tag(...)`.
 - **Only tested with `node-postgres` and `psql`.** Other drivers may exercise paths that have no test yet.
