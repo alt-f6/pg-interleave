@@ -44,7 +44,7 @@ If your scenario can be written as plain sequential `await`s on two clients, you
 
 ## Install
 
-> Docker images, release binaries and the npm package are published with each GitHub release (latest: **v0.6.3**).
+> Docker images, release binaries and the npm package are published with each GitHub release (latest: **v0.6.4**).
 
 ### 1. Run the proxy
 
