@@ -52,7 +52,7 @@ If your scenario can be written as plain sequential `await`s on two clients, you
 
 ### Why not just `Promise.all` or `sleep(50)`?
 
-- **Uncoordinated tests pass by accident.** A typical Node.js round trip to a local Postgres takes about half a millisecond, so racing transactions rarely overlap. The bug is there, but the test almost never sees it (0–2 out of 100 runs in the benchmark above).
+- **Uncoordinated tests pass by accident.** Racing transactions rarely overlap on a local connection. The bug is there, but the plain test almost never sees it (see the benchmark in the Schedule fuzzer section).
 - **`sleep()` is slow and brittle.** Arbitrary delays lengthen CI and still fail under CPU throttling or a busy runner.
 - **Barriers pin the order.** pg-interleave pauses statements at the PostgreSQL wire-protocol boundary, so you choose which statement goes first, every time.
 
