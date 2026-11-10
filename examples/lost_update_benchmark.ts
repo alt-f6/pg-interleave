@@ -65,16 +65,29 @@ async function runBenchmark(offsetMs: number, runs = 100): Promise<number> {
 
 async function main() {
   const fuzzerActive = await checkProxyMode();
-  const modeStr = fuzzerActive === null ? "UNKNOWN (Control API unreachable)" : fuzzerActive ? "ENABLED (--fuzz active)" : "DISABLED (baseline mode)";
+  const modeStr =
+    fuzzerActive === null
+      ? "UNKNOWN (Control API unreachable)"
+      : fuzzerActive
+      ? "ENABLED (--fuzz active)"
+      : "DISABLED (baseline mode)";
+
   console.log(`[lost_update_benchmark] Target: ${connStr}`);
   console.log(`[lost_update_benchmark] Schedule Fuzzer: ${modeStr}`);
-  console.log("Running Lost Update Benchmark (100 iterations per scenario)...\n");
 
-  const offset5 = await runBenchmark(5, 100);
-  console.log(`Offset 5ms:  ${offset5}/100 lost updates detected`);
+  // Читаем список смещений из окружения: "0,1,2,5,15"
+  const rawOffsets = process.env.OFFSETS || "5,15";
+  const offsets = rawOffsets
+    .split(",")
+    .map((s) => parseInt(s.trim(), 10))
+    .filter((n) => !isNaN(n));
 
-  const offset15 = await runBenchmark(15, 100);
-  console.log(`Offset 15ms: ${offset15}/100 lost updates detected`);
+  console.log(`Running Lost Update Benchmark (100 iterations per offset: ${offsets.join(", ")}ms)...\n`);
+
+  for (const offset of offsets) {
+    const detected = await runBenchmark(offset, 100);
+    console.log(`Offset ${offset}ms:\t${detected}/100 lost updates detected`);
+  }
 }
 
 main().catch(console.error);
