@@ -29,7 +29,8 @@ pg / any client ──:5433──▶ proxy ──────▶ PostgreSQL :543
   <a href="#schedule-fuzzer-automated-race-condition-discovery">Schedule Fuzzer</a> •
   <a href="#trace-record--replay">Trace Record & Replay</a> •
   <a href="#http-control-plane">HTTP API</a> •
-  <a href="#limitations">Limitations</a>
+  <a href="#comparison-with-alternatives">Alternatives</a> •
+  <a href="#limitations--protocol-edge-cases">Limitations</a>
 </p>
 
 ---
@@ -41,6 +42,12 @@ Most concurrency tests either run two transactions with `Promise.all` and hope, 
 pg-interleave is for the case where you **don't**: a function in your application opens a transaction and runs several statements, and you want to freeze it between two of them, run something else, then let it continue. Nothing in the application code changes. The test only says "stop the connection that is about to run `UPDATE accounts ...`".
 
 If your scenario can be written as plain sequential `await`s on two clients, you don't need this tool. PostgreSQL's own `isolationtester` is also worth knowing: it explores permutations of steps across sessions and lives inside the Postgres source tree.
+
+### Why not just use `Promise.all` or `sleep(50)`?
+
+- **Uncoordinated tests pass by accident.** In typical Node.js integration tests, query round-trips take ~0.5ms. Race conditions manifest in only **0–2 out of 100** test runs, creating flaky CI pipelines that pass locally but corrupt production data.
+- **`sleep()` makes tests slow and brittle.** Arbitrary delays slow down CI and still fail under CPU throttling or variable runner load.
+- **pg-interleave guarantees deterministic interleavings.** It pauses transactions at the PostgreSQL wire-protocol boundary (`Frontend/Backend v3.0`), letting you sequence statements across concurrent sessions without altering application code.
 
 ## Install
 
@@ -132,12 +139,12 @@ console.log((await observer.query("SELECT balance FROM accounts")).rows[0]); // 
 
 ## What it can do
 
-| Action                      | What happens                                                                                                                                |
-| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
-| `pause_before_query`        | The matching statement is held in the proxy. PostgreSQL has not seen it yet. The test releases it when ready.                               |
-| `pause_after_response`      | The statement runs (locks taken, rows written), but the response is held until the test releases it.                                        |
-| `drop_connection_on_commit` | After the server answers `CommandComplete COMMIT`, the proxy closes the client socket. The commit is durable; the client never hears back.  |
-| `synthetic_deadlock`        | The matching statement never reaches the server. The client gets a well-formed `ErrorResponse` with SQLSTATE `40P01` and a `ReadyForQuery`. |
+| Action                      | What happens                                                                                                                                                                                                 |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `pause_before_query`        | The matching statement is held in the proxy. PostgreSQL has not seen it yet. The test releases it when ready.                                                                                                |
+| `pause_after_response`      | The statement runs (locks taken, rows written), but the response is held until the test releases it.                                                                                                         |
+| `drop_connection_on_commit` | After PostgreSQL completes the commit (explicit `COMMIT` or single autocommit statement), the proxy closes the client TCP socket. The commit is durable on disk, but the client never receives confirmation. |
+| `synthetic_deadlock`        | The matching statement never reaches the server. The client gets a well-formed `ErrorResponse` with SQLSTATE `40P01` and a `ReadyForQuery`.                                                                  |
 
 Behavior you can rely on (each is covered by a test):
 
@@ -192,6 +199,16 @@ The same scenario with `SELECT ... FOR UPDATE` makes B block on A's row lock, an
 [`examples/retry-anomaly`](examples/retry-anomaly) shows a common mistake rather than a bug in any library. A function inserts a payment inside a transaction and is wrapped in a generic retry helper (`p-retry` here). pg-interleave drops the connection **after** Postgres committed but **before** the client saw the result. The helper sees a network error, retries, and the order is inserted a second time: `billing_orders` ends up with two rows ($100 charged instead of $50).
 
 The retry was not wrong to fire; the transaction was not safe to repeat. The usual fix is an idempotency key with a unique constraint (`INSERT ... ON CONFLICT (idempotency_key) DO NOTHING`). This is the kind of failure that is almost impossible to reproduce with mocks, because the commit really happened on the server.
+
+## Real-World Case Study: pg-boss Resilience
+
+We verified `pg-interleave` against [`pg-boss`](https://github.com/timgit/pg-boss) (v12.38.1), a production-grade PostgreSQL job queue. Using deterministic wire-level interception, we validated core queue invariants without modifying application or library code:
+
+- **Synthetic `40P01` Deadlock during Polling:** Injected deadlock errors directly into the internal queue CTE (`UPDATE pgboss.job_common SET state = 'active'`). Verified worker survivability, backoff retry recovery, and verified rule execution via `assertFired()`.
+- **Torn Commit on Completion:** Froze execution right at `UPDATE pgboss.job_common SET state = 'completed'` and terminated the socket post-commit, proving the job remains visibly locked (`active`) until released.
+- **Fuzzer Stress:** Executed 50 concurrent jobs under active schedule jitter (`--fuzz --fuzz-max-delay-ms 30`) with zero duplicate executions or state leaks.
+
+👉 **[Read the full pg-boss case study and test suite →](./examples/pg-boss-exploration)**
 
 ## SDK
 
@@ -406,6 +423,18 @@ The proxy holds outgoing queries until their turn in the recorded schedule arriv
 | `POST /reset`       | Remove every rule, release every barrier, and clear in-memory trace buffer.                                                                     |
 
 The control plane has **no authentication**. Keep it on `127.0.0.1`.
+
+## Comparison with Alternatives
+
+| Feature                          | pg-interleave                      | Toxiproxy                    | PostgreSQL `isolationtester`  | Application In-Memory Mocks |
+| :------------------------------- | :--------------------------------- | :--------------------------- | :---------------------------- | :-------------------------- |
+| **Layer**                        | **L7 (PostgreSQL Wire v3.0)**      | L4 (TCP stream)              | PostgreSQL Internals (C)      | In-Process / Runtime memory |
+| **Statement-Level Interception** | **Yes** (Regex, AST, `$1` params)  | No (all or nothing)          | Yes (spec scripts)            | No (mocked DB driver)       |
+| **Requires Code Changes**        | **No** (point DB URL to port 5433) | No                           | Yes (requires custom `.spec`) | Yes (heavy mock setup)      |
+| **Real ACID / Locks**            | **Yes** (real PostgreSQL engine)   | Yes                          | Yes                           | No (fake in-memory state)   |
+| **Torn Commit Injection**        | **Yes** (drop socket post-WAL)     | No (cannot inspect `COMMIT`) | No                            | No                          |
+| **Synthetic 40P01 Deadlocks**    | **Yes** (wire ErrorResponse)       | No                           | No                            | Partial (manual throw)      |
+| **Schedule Fuzzing & Replay**    | **Yes** (SplitMix64 + trace)       | No                           | No                            | No                          |
 
 ## Limitations & Protocol Edge Cases
 
