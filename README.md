@@ -145,8 +145,9 @@ Behavior you can rely on (each is covered by a test):
 - **One-shot by default.** A rule fires once (`times: 1`). Pass `times` to change it.
 - **Bad patterns fail loudly.** An invalid regex is rejected with HTTP 400 at registration.
 - **Timeouts are errors, not silence.** If a barrier is not released within the TTL, the client receives SQLSTATE `57014` and `GET /events` reports `had_timeouts: true`, so a test can fail on it.
+- **No silent misses.** `await barrier.assertFired(n)` verifies that the rule physically matched and intercepted the query exactly `n` times. If an ORM changes its SQL format and the regex misses, the assertion fails loudly instead of letting a broken test pass.
 - **Per-connection targeting.** Rules can be scoped to a backend PID (the SDK reads it with `pg_backend_pid()`).
-- **Extended protocol.** Prepared statements are matched when they are executed, including repeated executions, and a synthetic deadlock leaves the stream clean for the next query (checked with both `node-postgres` and `libpq`).
+- **Extended protocol.** Prepared statements are matched when executed, including repeated executions, and synthetic deadlocks cleanly recover the protocol stream with standard ErrorResponse frames.
 - **Parameter inspection.** Match parameterized queries (`$1`, `$2`) using exact values or `"*"` wildcards via `withParams`.
 
 ## Example: a real lost update
@@ -199,19 +200,24 @@ const chaos = new PgInterleaveClient("http://127.0.0.1:9090");
 
 await chaos.reset(); // clear all rules, release all barriers
 const barrier = await chaos.intercept({
-  // pause_before_query by default
-  client, // or clientPid
-  onQueryMatch: /regex/,
-  withParams: ["*", 2], // optional: match $1, $2 arguments
-  action: "pause_after_response", // optional
+  client, // scopes rule to client PID via pg_backend_pid()
+  onQueryMatch: /UPDATE accounts SET balance/,
+  withParams: ["*", 100], // optional: match $1, $2 arguments
+  action: "pause_before_query", // or "pause_after_response"
   times: 1, // optional, default 1
 });
-await barrier.wait(); // resolves when the statement is held
-await barrier.resume(); // release it
 
-await chaos.injectTornCommit(client);
-await chaos.injectDeadlock({ client, onQueryMatch: /UPDATE seats/ });
-await chaos.hasTimeouts(); // true if any barrier hit its TTL
+await barrier.wait(); // resolves when statement freezes in proxy
+await barrier.resume(); // releases statement to PostgreSQL
+await barrier.assertFired(1); // throws if rule was never triggered
+
+// Network fault injection:
+await chaos.intercept({
+  client,
+  onQueryMatch: /COMMIT/i,
+  action: "drop_connection_on_commit",
+});
+await chaos.hasTimeouts(); // true if any barrier exceeded TTL
 ```
 
 ### Query Matching Semantics
@@ -338,7 +344,7 @@ cargo run --release -p pg-interleave-server -- \
 - **Empirical Detection Rate.** When tested against an uncoordinated read-modify-write scenario without artificial in-code sleeps (`examples/lost_update_benchmark.ts`):
   - Without fuzzer (`TCP_NODELAY` enabled): **0–2/100** lost updates at 5 ms and 15 ms start offsets (anomalies rarely manifest naturally due to sub-millisecond query execution).
   - With schedule fuzzer enabled: **85–96/100** lost updates detected across 5 ms and 15 ms start offsets.
-  - Deterministic replay under fixed seed (`--seed 42`, `--fuzz-max-delay-ms 30`): yields consistent detection counts across repeated benchmark runs.
+  - Passing the same seed (e.g. --seed 42) guarantees the exact same per-connection schedule jitter sequence across runs, yielding consistent anomaly detection rates across repeated benchmark suites.
 
   To reproduce the benchmark figures locally:
 
@@ -351,7 +357,7 @@ cargo run --release -p pg-interleave-server -- \
   # 2. Schedule fuzzer run with fixed seed:
   cargo run --release -p pg-interleave-server -- --fuzz --seed 42 --fuzz-max-delay-ms 30
   npx tsx examples/lost_update_benchmark.ts
-  # Output: ~85-92/100 detected
+  # Output: 85-96/100 detected
   ```
 
 - **Latency Cost.** Every delayed query costs up to `--fuzz-max-delay-ms`, so keep the bound small (e.g., 20–30 ms) in CI.
@@ -390,22 +396,28 @@ The proxy holds outgoing queries until their turn in the recorded schedule arriv
 | Method and path     | Purpose                                                                                                                                         |
 | ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
 | `POST /intercept`   | Add a rule: `{ query_pattern?, ast?: { operation?, table? }, target_pid?, session_tag?, with_params?, action?, times? }`. 400 on invalid regex. |
-| `GET /barriers`     | IDs of barriers currently held.                                                                                                                 |
-| `POST /resume/:id`  | Release one barrier. 404 if unknown.                                                                                                            |
-| `POST /resume-next` | Release the oldest barrier. 404 if none.                                                                                                        |
-| `POST /flush-trace` | Flush current in-memory execution trace to the file specified in `--record`.                                                                    |
-| `GET /events`       | `{ "had_timeouts": bool }`                                                                                                                      |
+| `GET /rules`        | List registered rules with their `fired_count` and `times_remaining`.                                                                           |
+| `GET /rules/:id`    | Get execution metrics and status for a specific rule. 404 if not found.                                                                         |
+| `GET /barriers`     | Active barriers held in proxy: `[ { "id": "barrier_1", "rule_id": "rule_1" } ]`.                                                                |
+| `POST /resume/:id`  | Release one barrier by `barrier_id` or `rule_id`. 404 if unknown.                                                                               |
+| `POST /resume-next` | Release the oldest active barrier in FIFO order. 404 if none.                                                                                   |
+| `POST /flush-trace` | Flush current in-memory execution trace to file specified in `--record`.                                                                        |
+| `GET /events`       | Check proxy status: `{ "had_timeouts": bool, "fuzzer_enabled": bool }`.                                                                         |
 | `POST /reset`       | Remove every rule, release every barrier, and clear in-memory trace buffer.                                                                     |
 
 The control plane has **no authentication**. Keep it on `127.0.0.1`.
 
-## Limitations
+## Limitations & Protocol Edge Cases
 
-- **No TLS.** The proxy answers `N` to `SSLRequest` and `GSSENCRequest`, so clients must connect in plaintext (`sslmode=disable`).
-- **AST scope.** AST matching supports top-level `SELECT`, `INSERT`, `UPDATE`, `DELETE`, multi-statement query batches, and `WITH` CTEs for `SELECT`. Data-modifying CTEs (e.g., `WITH u AS (UPDATE ...) SELECT * FROM u`) do **not** match as `UPDATE` (the outer statement is parsed as `SELECT`); use regex matching (`onQueryMatch`) when targeting mutating CTEs.
-- **One shared proxy.** State is global. Run test files serially (`vitest --fileParallelism=false`) or call `reset()` between them.
-- **Connection pools.** Without `target_pid` or `sessionTag`, a rule matches any connection. When using pools where physical connections change dynamically, route statements using `sessionTag` and `PgInterleaveClient.tag(...)`.
-- **Only tested with `node-postgres` and `psql`.** Other drivers may exercise paths that have no test yet.
+`pg-interleave` operates as an L7 stateful proxy over the PostgreSQL Frontend/Backend Protocol v3.0. To use it reliably, keep the following architectural constraints in mind:
+
+- **TLS / SSL Termination:** The proxy inspects unencrypted PostgreSQL wire-protocol frames. It responds with `'N'` to all `SSLRequest` and `GSSENCRequest` packets during connection startup. Client configurations must allow plaintext connections (`sslmode=disable` or `sslmode=prefer`). Connecting with `sslmode=require` or `sslmode=verify-full` will immediately abort the client handshake.
+- **Extended Protocol Pipeline with `Flush` (`'H'`):** The proxy buffers incoming messages and evaluates interceptor barriers upon receiving a `Sync` (`'S'`) or `Simple Query` (`'Q'`) packet. Specialized drivers that use advanced pipelining and rely on explicit `Flush` (`'H'`) frames to read intermediate results before sending `Sync` can encounter socket deadlocks.
+- **Mutating Common Table Expressions (CTEs):** The AST selector inspects root-level SQL statements. In queries where a data-modifying clause is nested inside a CTE (such as `WITH moved AS (UPDATE inventory ...) SELECT * FROM moved`), the AST engine categorizes the statement as `SELECT`. For data-modifying CTEs, use regex pattern matching (`onQueryMatch`) instead of `ast`.
+- **Connection Poolers in Transaction Mode (PgBouncer / RDS Proxy):** When using PgBouncer in `pool_mode = transaction` (or Supabase Supavisor), physical server connections and backend PIDs (`pg_backend_pid()`) change between transactions on the same client pool. Target rules using `sessionTag` comments (`/* interleave: tag=workerA */`) rather than `clientPid`. Furthermore, avoid holding barriers longer than PgBouncer's `query_wait_timeout`.
+- **In-Memory Global State:** Interception rules, barrier queues, and connection mappings are shared across the proxy process. Integration test suites should either run test files serially (`vitest --fileParallelism=false`), issue `await chaos.reset()` between test cases, or assign distinct `sessionTag` markers to avoid cross-test rule collisions.
+- **Out-of-Band Statement Cancellation:** If a query is held by a `pause_before_query` barrier, it has not yet been forwarded to PostgreSQL. If the client concurrently opens a separate connection to issue a `CancelRequest` (80877102), PostgreSQL will have no knowledge of the backend query, and the cancellation will have no effect on the held barrier until it is either resumed or exceeds its `--barrier-ttl-ms`.
+- **Fuzzer Determinism Boundaries:** Passing `--seed <u64>` guarantees the exact same pseudo-random sequence of micro-delays injected by the proxy. However, client-side runtime scheduling (e.g., Node.js event loop latency, OS thread preemption, and disk write times) can still introduce slight millisecond variations in when queries reach the socket. Benchmark metrics reflect an empirical distribution rather than a hardware-clock lockstep.
 
 ## Development
 
