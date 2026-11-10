@@ -128,11 +128,11 @@ describe("Schedule Fuzzer Empirical Validation", () => {
 
   it("proves that fuzzer exposes race conditions where baseline execution yields zero anomalies", async () => {
     await spawnProxy([]);
-    const baselineLostUpdates = await runScenario(connStr, 20, 15);
+    const baselineLostUpdates = await runScenario(connStr, 20, 45);
     expect(baselineLostUpdates).toBeLessThanOrEqual(2);
 
-    await spawnProxy(["--fuzz", "--seed", "42", "--fuzz-max-delay-ms", "30"]);
-    const fuzzLostUpdates = await runScenario(connStr, 20, 15);
-    expect(fuzzLostUpdates).toBeGreaterThan(0);
+    await spawnProxy(["--fuzz", "--seed", "42", "--fuzz-max-delay-ms", "150"]);
+    const fuzzedLostUpdates = await runScenario(connStr, 20, 45);
+    expect(fuzzedLostUpdates).toBeGreaterThan(baselineLostUpdates);
   }, 45_000);
 });
