@@ -38,7 +38,7 @@ pg / any client ──:5433──▶ proxy ──────▶ PostgreSQL :543
 
 | Scenario                                                                        | Plain test run             | With the schedule fuzzer     |
 | ------------------------------------------------------------------------------- | -------------------------- | ---------------------------- |
-| Uncoordinated read-modify-write, two concurrent transactions, 100 runs per cell | **0–2 / 100** lost updates | **85–96 / 100** lost updates |
+| Uncoordinated read-modify-write, two concurrent transactions, 100 runs per cell | **0–5 / 100** lost updates | **85–98 / 100** lost updates |
 
 The race is real in both runs. Without the fuzzer, queries finish in well under a millisecond, so the transactions almost never overlap. The fuzzer moves them into overlapping orders. Method and commands to reproduce are in [Empirical detection rate](#capabilities--guarantees).
 
@@ -398,8 +398,8 @@ cargo run --release -p pg-interleave-server -- \
 
 - **Per-connection reproducibility.** Each client connection gets an independent PRNG stream derived with SplitMix64 from `(base_seed, conn_id)`. With the same `--seed`, every connection receives the same sequence of delays, without cross-connection coupling.
 - **Empirical detection rate.** Scenario: an uncoordinated read-modify-write on one row, two transactions, no sleeps in the code, the second transaction starting 5 ms or 15 ms after the first, 100 runs per cell ([`examples/lost_update_benchmark.ts`](examples/lost_update_benchmark.ts)).
-  - Without the fuzzer (`TCP_NODELAY` enabled on both sockets): **0–2 / 100** lost updates.
-  - With the fuzzer (`--fuzz --seed 42 --fuzz-max-delay-ms 30`): **85–96 / 100**.
+  - Without the fuzzer (`TCP_NODELAY` enabled on both sockets): **0–5 / 100** lost updates at 5 ms and **0–2 / 100** at 15 ms (baseline scheduling noise varies by machine and OS scheduler).
+  - With the fuzzer (`--fuzz --seed 42 --fuzz-max-delay-ms 30`): **85–98 / 100** (e.g. 91–98 / 100 on Windows 11, 85–90 / 100 on Linux).
   - The same seed reproduces the same delay sequence per connection. Detection rates across repeated runs are close but not identical, because client-side timing still varies (see [Limitations](#limitations--protocol-edge-cases)).
 
   To reproduce:
@@ -410,12 +410,12 @@ cargo run --release -p pg-interleave-server -- \
   # 1. Baseline run (without fuzzer)
   cargo run --release -p pg-interleave-server -- --listen-addr 127.0.0.1:5433
   npx tsx lost_update_benchmark.ts
-  # prints "Schedule Fuzzer: DISABLED", then roughly 0-2/100
+  # prints "Schedule Fuzzer: DISABLED", then roughly 0-5/100 (machine-dependent)
 
   # 2. Fuzzer run with a fixed seed
   cargo run --release -p pg-interleave-server -- --fuzz --seed 42 --fuzz-max-delay-ms 30
   npx tsx lost_update_benchmark.ts
-  # prints "Schedule Fuzzer: ENABLED", then roughly 85-96/100
+  # prints "Schedule Fuzzer: ENABLED", then roughly 85-98/100
   ```
 
   The script reads `DATABASE_URL` (default: the local proxy on port 5433) and cleans up its table.
