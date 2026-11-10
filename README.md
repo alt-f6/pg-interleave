@@ -8,11 +8,9 @@
   <img src="./demo.gif" alt="pg-interleave demo" width="850">
 </p>
 
-A PostgreSQL wire-protocol proxy for **deterministic concurrency tests**.
+**Deterministic concurrency tests for PostgreSQL.** A wire-protocol proxy that sits between your code and Postgres and lets a test freeze a specific statement, hold its response, tear a connection right after a commit, or inject a `40P01` deadlock, on command and in a fixed order. No changes to the application code.
 
-It sits between your test code and Postgres, understands the v3.0 protocol, and lets a test pause a specific statement, hold its response, tear the connection after a commit, or inject a `40P01` deadlock error, all on command and in a fixed order.
-
-> **Status: alpha.** Rust server + TypeScript SDK, tested on PostgreSQL 16. APIs may change. Plaintext connections only.
+> **Status: alpha.** Rust server plus TypeScript SDK. CI runs against PostgreSQL 14, 15 and 16. APIs may change. Plaintext connections only (see [Limitations](#limitations--protocol-edge-cases)).
 
 ```
 test code ──HTTP :9090──▶ control plane ─┐
@@ -27,7 +25,8 @@ pg / any client ──:5433──▶ proxy ──────▶ PostgreSQL :543
   <a href="#what-it-can-do">Capabilities</a> •
   <a href="#sdk">SDK</a> •
   <a href="#schedule-fuzzer-automated-race-condition-discovery">Schedule Fuzzer</a> •
-  <a href="#trace-record--replay">Trace Record & Replay</a> •
+  <a href="#trace-record--replay">Record & Replay</a> •
+  <a href="#real-world-case-study-pg-boss">pg-boss case study</a> •
   <a href="#http-control-plane">HTTP API</a> •
   <a href="#comparison-with-alternatives">Alternatives</a> •
   <a href="#limitations--protocol-edge-cases">Limitations</a>
@@ -35,27 +34,35 @@ pg / any client ──:5433──▶ proxy ──────▶ PostgreSQL :543
 
 ---
 
+## Results at a glance
+
+| Scenario                                                                        | Plain test run             | With the schedule fuzzer     |
+| ------------------------------------------------------------------------------- | -------------------------- | ---------------------------- |
+| Uncoordinated read-modify-write, two concurrent transactions, 100 runs per cell | **0–2 / 100** lost updates | **85–96 / 100** lost updates |
+
+The race is real in both runs. Without the fuzzer, queries finish in well under a millisecond, so the transactions almost never overlap. The fuzzer moves them into overlapping orders. Method and commands to reproduce are in [Empirical detection rate](#capabilities--guarantees).
+
 ## Why
 
 Most concurrency tests either run two transactions with `Promise.all` and hope, or sequence them by hand with `await`. The second is already deterministic, as long as you control every statement.
 
-pg-interleave is for the case where you **don't**: a function in your application opens a transaction and runs several statements, and you want to freeze it between two of them, run something else, then let it continue. Nothing in the application code changes. The test only says "stop the connection that is about to run `UPDATE accounts ...`".
+pg-interleave is for the case where you **don't**: a function in your application opens a transaction and runs several statements, and you want to freeze it between two of them, run something else, then let it continue. The test only says "stop the connection that is about to run `UPDATE accounts ...`".
 
 If your scenario can be written as plain sequential `await`s on two clients, you don't need this tool. PostgreSQL's own `isolationtester` is also worth knowing: it explores permutations of steps across sessions and lives inside the Postgres source tree.
 
-### Why not just use `Promise.all` or `sleep(50)`?
+### Why not just `Promise.all` or `sleep(50)`?
 
-- **Uncoordinated tests pass by accident.** In typical Node.js integration tests, query round-trips take ~0.5ms. Race conditions manifest in only **0–2 out of 100** test runs, creating flaky CI pipelines that pass locally but corrupt production data.
-- **`sleep()` makes tests slow and brittle.** Arbitrary delays slow down CI and still fail under CPU throttling or variable runner load.
-- **pg-interleave guarantees deterministic interleavings.** It pauses transactions at the PostgreSQL wire-protocol boundary (`Frontend/Backend v3.0`), letting you sequence statements across concurrent sessions without altering application code.
+- **Uncoordinated tests pass by accident.** A typical Node.js round trip to a local Postgres takes about half a millisecond, so racing transactions rarely overlap. The bug is there, but the test almost never sees it (0–2 out of 100 runs in the benchmark above).
+- **`sleep()` is slow and brittle.** Arbitrary delays lengthen CI and still fail under CPU throttling or a busy runner.
+- **Barriers pin the order.** pg-interleave pauses statements at the PostgreSQL wire-protocol boundary, so you choose which statement goes first, every time.
 
 ## Install
 
-> Docker images, release binaries and the npm package are published with each GitHub release (latest: **v0.7.0**).
+> Docker images, release binaries and the npm package are published with each GitHub release (latest: **v0.7.1**).
 
 ### 1. Run the proxy
 
-Docker (pass all three flags: `docker run` arguments replace the image defaults):
+**Docker.** Pass all three flags: `docker run` arguments replace the image defaults.
 
 ```bash
 docker run -d --name pg-interleave \
@@ -67,13 +74,28 @@ docker run -d --name pg-interleave \
   --target-addr host.docker.internal:5432
 ```
 
-Or download a standalone binary for Linux, macOS or Windows from [Releases](https://github.com/alt-f6/pg-interleave/releases).
+**Standalone binary.** Download the archive for your platform from [Releases](https://github.com/alt-f6/pg-interleave/releases):
+
+| Platform            | Asset                                |
+| ------------------- | ------------------------------------ |
+| Linux x86_64        | `pg-interleave-linux-x86_64.tar.gz`  |
+| macOS Apple Silicon | `pg-interleave-macos-aarch64.tar.gz` |
+| Windows x86_64      | `pg-interleave-windows-x86_64.zip`   |
+
+The archive contains a single executable named `pg-interleave` (`pg-interleave.exe` on Windows). It is the same program as the `pg-interleave-server` crate.
+
+```bash
+tar xzf pg-interleave-linux-x86_64.tar.gz
+./pg-interleave --listen-addr 127.0.0.1:5433 --target-addr 127.0.0.1:5432
+```
 
 ### 2. Install the SDK
 
 ```bash
 npm install -D pg-interleave
 ```
+
+Requires Node 20+.
 
 ### From source
 
@@ -88,11 +110,11 @@ cargo run --release -p pg-interleave-server -- \
 
 # run the SDK tests
 cd packages/sdk-ts
-npm ci
+npm ci        # also builds dist/ via the prepare script
 npm test
 ```
 
-Point your client at port **5433** instead of 5432. The control plane is on 9090. Defaults: listen `127.0.0.1:5433`, target `127.0.0.1:5432`, control `127.0.0.1:9090`, barrier TTL 5000 ms (`--barrier-ttl-ms`).
+Point your client at port **5433** instead of 5432. The control plane is on 9090. Defaults: listen `127.0.0.1:5433`, target `127.0.0.1:5432`, control `127.0.0.1:9090`, barrier TTL 5000 ms (`--barrier-ttl-ms`). The target address can be a hostname.
 
 ## 10-second example
 
@@ -139,12 +161,12 @@ console.log((await observer.query("SELECT balance FROM accounts")).rows[0]); // 
 
 ## What it can do
 
-| Action                      | What happens                                                                                                                                                                                                 |
-| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `pause_before_query`        | The matching statement is held in the proxy. PostgreSQL has not seen it yet. The test releases it when ready.                                                                                                |
-| `pause_after_response`      | The statement runs (locks taken, rows written), but the response is held until the test releases it.                                                                                                         |
-| `drop_connection_on_commit` | After PostgreSQL completes the commit (explicit `COMMIT` or single autocommit statement), the proxy closes the client TCP socket. The commit is durable on disk, but the client never receives confirmation. |
-| `synthetic_deadlock`        | The matching statement never reaches the server. The client gets a well-formed `ErrorResponse` with SQLSTATE `40P01` and a `ReadyForQuery`.                                                                  |
+| Action                      | What happens                                                                                                                                                                                                   |
+| --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pause_before_query`        | The matching statement is held in the proxy. PostgreSQL has not seen it yet. The test releases it when ready.                                                                                                  |
+| `pause_after_response`      | The statement runs (locks taken, rows written), but the response is held until the test releases it.                                                                                                           |
+| `drop_connection_on_commit` | After PostgreSQL completes the commit (explicit `COMMIT` or a single autocommit statement), the proxy closes the client TCP socket. The commit is durable on disk, but the client never receives confirmation. |
+| `synthetic_deadlock`        | The matching statement never reaches the server. The client gets a well-formed `ErrorResponse` with SQLSTATE `40P01` and a `ReadyForQuery`.                                                                    |
 
 Behavior you can rely on (each is covered by a test):
 
@@ -152,9 +174,9 @@ Behavior you can rely on (each is covered by a test):
 - **One-shot by default.** A rule fires once (`times: 1`). Pass `times` to change it.
 - **Bad patterns fail loudly.** An invalid regex is rejected with HTTP 400 at registration.
 - **Timeouts are errors, not silence.** If a barrier is not released within the TTL, the client receives SQLSTATE `57014` and `GET /events` reports `had_timeouts: true`, so a test can fail on it.
-- **No silent misses.** `await barrier.assertFired(n)` verifies that the rule physically matched and intercepted the query exactly `n` times. If an ORM changes its SQL format and the regex misses, the assertion fails loudly instead of letting a broken test pass.
-- **Per-connection targeting.** Rules can be scoped to a backend PID (the SDK reads it with `pg_backend_pid()`).
-- **Extended protocol.** Prepared statements are matched when executed, including repeated executions, and synthetic deadlocks cleanly recover the protocol stream with standard ErrorResponse frames.
+- **No silent misses.** `await rule.assertFired(n)` checks that the rule matched exactly `n` times and throws otherwise. If an ORM or library changes its SQL formatting and your pattern stops matching, the test fails instead of passing for the wrong reason.
+- **Per-connection targeting.** Rules can be scoped to a backend PID (the SDK reads it with `pg_backend_pid()`) or to a SQL comment tag.
+- **Extended protocol.** Prepared statements are matched when executed, including repeated executions, and synthetic deadlocks cleanly recover the protocol stream with standard `ErrorResponse` frames.
 - **Parameter inspection.** Match parameterized queries (`$1`, `$2`) using exact values or `"*"` wildcards via `withParams`.
 
 ## Example: a real lost update
@@ -198,17 +220,24 @@ The same scenario with `SELECT ... FOR UPDATE` makes B block on A's row lock, an
 
 [`examples/retry-anomaly`](examples/retry-anomaly) shows a common mistake rather than a bug in any library. A function inserts a payment inside a transaction and is wrapped in a generic retry helper (`p-retry` here). pg-interleave drops the connection **after** Postgres committed but **before** the client saw the result. The helper sees a network error, retries, and the order is inserted a second time: `billing_orders` ends up with two rows ($100 charged instead of $50).
 
-The retry was not wrong to fire; the transaction was not safe to repeat. The usual fix is an idempotency key with a unique constraint (`INSERT ... ON CONFLICT (idempotency_key) DO NOTHING`). This is the kind of failure that is almost impossible to reproduce with mocks, because the commit really happened on the server.
+The retry was not wrong to fire; the transaction was not safe to repeat. The usual fix is an idempotency key with a unique constraint (`INSERT ... ON CONFLICT (idempotency_key) DO NOTHING`). This kind of failure is almost impossible to reproduce with mocks, because the commit really happened on the server.
 
-## Real-World Case Study: pg-boss Resilience
+## Real-world case study: pg-boss
 
-We verified `pg-interleave` against [`pg-boss`](https://github.com/timgit/pg-boss) (v12.38.1), a production-grade PostgreSQL job queue. Using deterministic wire-level interception, we validated core queue invariants without modifying application or library code:
+We ran pg-interleave against [`pg-boss`](https://github.com/timgit/pg-boss) v12.38.1, a PostgreSQL job queue, without modifying the library. The suite is in [`examples/pg-boss-exploration`](examples/pg-boss-exploration) (8 tests). What it checks and what it found:
 
-- **Synthetic `40P01` Deadlock during Polling:** Injected deadlock errors directly into the internal queue CTE (`UPDATE pgboss.job_common SET state = 'active'`). Verified worker survivability, backoff retry recovery, and verified rule execution via `assertFired()`.
-- **Torn Commit on Completion:** Froze execution right at `UPDATE pgboss.job_common SET state = 'completed'` and terminated the socket post-commit, proving the job remains visibly locked (`active`) until released.
-- **Fuzzer Stress:** Executed 50 concurrent jobs under active schedule jitter (`--fuzz --fuzz-max-delay-ms 30`) with zero duplicate executions or state leaks.
+| Scenario                  | Injected fault                                                                                  | Observed                                                                                          |
+| ------------------------- | ----------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| Deadlock while polling    | `synthetic_deadlock` (`40P01`) on the fetch `UPDATE pgboss.job_common ... SET state = 'active'` | Rule fired once (`assertFired`), the worker kept polling and processed the job                    |
+| Torn commit on completion | `drop_connection_on_commit` on the `completed` update                                           | Job ended in `completed`, the handler ran exactly once                                            |
+| Held completion           | `pause_before_query` on the `completed` update                                                  | Job stays `active` in the database while the statement is held, becomes `completed` after release |
+| Schedule fuzzing          | 50 jobs under `--fuzz --fuzz-max-delay-ms 30`                                                   | Every job executed exactly once                                                                   |
+| Expire vs. complete       | Handler sleeps past the visibility timeout                                                      | Job is picked up again (`retry_count: 1`), two executions in total                                |
+| Singleton send            | 10 concurrent `send()` calls with one `singletonKey`                                            | One row in the table                                                                              |
 
-👉 **[Read the full pg-boss case study and test suite →](./examples/pg-boss-exploration)**
+None of these produced a bug in pg-boss. They are listed because "the fault really happened and the library coped" is the result the tool is meant to give you.
+
+**What it found in pg-interleave itself.** The first version of the deadlock test passed without the fault ever being injected: pg-boss writes its fetch statement over several lines, and a single-line regex never matched. Nothing failed, because a rule that does not fire is silent by default. That is why `assertFired` exists and why a JavaScript `RegExp` is now compiled with dotAll and keeps its `i` flag (see [Query matching semantics](#query-matching-semantics)).
 
 ## SDK
 
@@ -217,36 +246,46 @@ const chaos = new PgInterleaveClient("http://127.0.0.1:9090");
 
 await chaos.reset(); // clear all rules, release all barriers
 const barrier = await chaos.intercept({
-  client, // scopes rule to client PID via pg_backend_pid()
+  client, // scopes the rule to this client's backend PID
   onQueryMatch: /UPDATE accounts SET balance/,
   withParams: ["*", 100], // optional: match $1, $2 arguments
   action: "pause_before_query", // or "pause_after_response"
   times: 1, // optional, default 1
 });
 
-await barrier.wait(); // resolves when statement freezes in proxy
-await barrier.resume(); // releases statement to PostgreSQL
-await barrier.assertFired(1); // throws if rule was never triggered
+await barrier.wait(); // resolves when the statement is frozen in the proxy
+await barrier.resume(); // releases the statement to PostgreSQL
+await barrier.assertFired(1); // throws unless the rule fired exactly once
 
-// Network fault injection:
-await chaos.intercept({
+// Network fault injection
+const tear = await chaos.intercept({
   client,
   onQueryMatch: /COMMIT/i,
   action: "drop_connection_on_commit",
 });
-await chaos.hasTimeouts(); // true if any barrier exceeded TTL
+await tear.assertFired(1);
+
+// Synthetic deadlock
+const deadlock = await chaos.injectDeadlock({
+  onQueryMatch: /UPDATE accounts/,
+  times: 1,
+});
+await deadlock.assertFired(1);
+
+await chaos.hasTimeouts(); // true if any barrier exceeded the TTL
 ```
 
-### Query Matching Semantics
+### Query matching semantics
 
-- **Multiline & dotAll (`(?s)`):** SQL queries sent by ORMs and drivers are almost always multi-line. When passing a JavaScript `RegExp`, `pg-interleave` automatically enables single-line mode / dotAll (`(?s)` or `(?is)` if the `/i` flag is present). This guarantees that `.*` matches across `\n` without manual flags.
-- **Raw Strings:** If you pass a plain `string`, `(?s)` is prepended by default. If your string already starts with Rust inline flags (e.g. `(?is)...`), it is passed as-is.
+- **Multiline and dotAll.** SQL from ORMs and drivers is often multi-line. A JavaScript `RegExp` is always compiled with the Rust `s` flag, so `.` matches `\n`. The `i` and `m` flags are preserved. This differs from plain JavaScript, where `.` does not cross newlines.
+- **Plain strings.** A `string` pattern gets `(?s)` prepended. If it already starts with Rust inline flags such as `(?is)`, it is used as-is.
+- **Check that it fired.** Patterns match against the exact SQL text the driver sends. When in doubt, record a run with `--record` and read the statements, then call `assertFired()` in the test.
 
-### Connection Pool Compatibility (SQL Comment Routing)
+### Connection pool compatibility (SQL comment routing)
 
-When using connection pools (`pg.Pool`, Prisma, Drizzle), physical connections are shared dynamically. You can route interceptor rules using SQL comment tags instead of capturing backend PIDs:
+With connection pools (`pg.Pool`, Prisma, Drizzle), physical connections are shared dynamically. Route rules with SQL comment tags instead of backend PIDs:
 
-```typescript
+```ts
 import { Pool } from "pg";
 import { PgInterleaveClient } from "pg-interleave";
 
@@ -261,7 +300,7 @@ const barrier = await chaos.intercept({
   onQueryMatch: /UPDATE inventory SET stock = stock - 1/,
 });
 
-// 2. Tag query dynamically using the SDK helper
+// 2. Tag the query with the SDK helper
 const taggedSql = PgInterleaveClient.tag(
   "UPDATE inventory SET stock = stock - 1 WHERE id = 1",
   "workerA",
@@ -272,11 +311,11 @@ await pool.query(taggedSql);
 await barrier.resume();
 ```
 
-### Prepared Statement Parameter Matching (`withParams`)
+### Prepared statement parameter matching (`withParams`)
 
-When your ORM (Drizzle, Prisma, TypeORM) uses parameterized queries (`$1`, `$2`), you can scope barriers to specific argument values or use `"*"` as a wildcard:
+When an ORM uses parameterized queries (`$1`, `$2`), scope barriers to specific argument values, or use `"*"` as a wildcard:
 
-```typescript
+```ts
 // Intercept only when deducting stock for item ID 2
 await chaos.intercept({
   client,
@@ -285,7 +324,7 @@ await chaos.intercept({
   withParams: [1, 2], // matches $1 = 1, $2 = 2
 });
 
-// Wildcard matching: any quantity, but strictly item ID 1
+// Wildcard: any quantity, but strictly item ID 1
 await chaos.intercept({
   client,
   onQueryMatch:
@@ -294,12 +333,12 @@ await chaos.intercept({
 });
 ```
 
-### Structural AST Query Selectors
+### Structural AST selectors
 
-Match queries structurally using AST parsing (`sqlparser-rs`) instead of brittle regexes:
+Match queries structurally (parsed with `sqlparser-rs`) instead of with brittle regexes:
 
-```typescript
-// Freezes the query matching operation and table, regardless of SQL syntax formatting
+```ts
+// Freezes the matching operation on the matching table, whatever the formatting
 const barrier = await chaos.intercept({
   client,
   ast: {
@@ -319,13 +358,11 @@ await barrier.wait();
 await barrier.resume();
 ```
 
-Supported operations: SELECT, INSERT, UPDATE, DELETE.
+Supported operations: `SELECT`, `INSERT`, `UPDATE`, `DELETE`. A simple-query batch with several statements matches if any statement in it matches. Data-modifying CTEs are not detected, see [Limitations](#limitations--protocol-edge-cases).
 
 ## Schedule fuzzer (Automated Race Condition Discovery)
 
-`pg-interleave` can inject deterministic, per-connection micro-jitters into incoming queries (including `BEGIN` and `COMMIT`), uncovering latent concurrency bugs such as **Lost Updates** and race conditions without manual intercept rules.
-
-Barriers let you test an interleaving you already thought of. The schedule fuzzer is for the ones you did not: it adds pseudo-random delays (jitter) before queries are forwarded to PostgreSQL, so that concurrent transactions reach the database in different orders from run to run. Run your existing concurrent tests under it and see whether anything breaks.
+Barriers let you test an interleaving you already thought of. The schedule fuzzer is for the ones you did not: it adds pseudo-random delays before queries (including `BEGIN` and `COMMIT`) are forwarded to PostgreSQL, so concurrent transactions reach the database in different orders from run to run. Run your existing concurrent tests under it and see whether anything breaks, for example a **lost update**.
 
 ```bash
 # start the proxy with fuzzing enabled
@@ -351,40 +388,46 @@ cargo run --release -p pg-interleave-server -- \
 | --------------------- | ------------------------------------------------------------------------------------ |
 | `--fuzz`              | Enable schedule fuzzing. Off by default.                                             |
 | `--seed <u64>`        | Seed for the pseudo-random generator. If omitted, a random one is chosen and logged. |
-| `--fuzz-max-delay-ms` | Upper bound for a single injected delay, in milliseconds.                            |
-| `--record <path>`     | Record execution schedule / interleavings to a JSON trace file.                      |
-| `--replay <path>`     | Replay execution trace from a previously recorded JSON file.                         |
+| `--fuzz-max-delay-ms` | Upper bound for a single injected delay, in milliseconds. Default 50.                |
+| `--record <path>`     | Record the execution schedule to a JSON trace file.                                  |
+| `--replay <path>`     | Replay a previously recorded JSON trace.                                             |
+
+`GET /events` reports `fuzzer_enabled`, so a test or benchmark can confirm which mode it is running in.
 
 ### Capabilities & Guarantees
 
-- **Per-Connection Reproducibility.** Each client connection receives an independent PRNG stream derived via SplitMix64 from `(base_seed, conn_id)`. Re-running with `--seed <u64>` guarantees reproducible schedule execution without cross-connection lock contention.
-- **Empirical Detection Rate.** When tested against an uncoordinated read-modify-write scenario without artificial in-code sleeps (`examples/lost_update_benchmark.ts`):
-  - Without fuzzer (`TCP_NODELAY` enabled): **0–2/100** lost updates at 5 ms and 15 ms start offsets (anomalies rarely manifest naturally due to sub-millisecond query execution).
-  - With schedule fuzzer enabled: **85–96/100** lost updates detected across 5 ms and 15 ms start offsets.
-  - Passing the same seed (e.g. --seed 42) guarantees the exact same per-connection schedule jitter sequence across runs, yielding consistent anomaly detection rates across repeated benchmark suites.
+- **Per-connection reproducibility.** Each client connection gets an independent PRNG stream derived with SplitMix64 from `(base_seed, conn_id)`. With the same `--seed`, every connection receives the same sequence of delays, without cross-connection coupling.
+- **Empirical detection rate.** Scenario: an uncoordinated read-modify-write on one row, two transactions, no sleeps in the code, the second transaction starting 5 ms or 15 ms after the first, 100 runs per cell ([`examples/lost_update_benchmark.ts`](examples/lost_update_benchmark.ts)).
+  - Without the fuzzer (`TCP_NODELAY` enabled on both sockets): **0–2 / 100** lost updates.
+  - With the fuzzer (`--fuzz --seed 42 --fuzz-max-delay-ms 30`): **85–96 / 100**.
+  - The same seed reproduces the same delay sequence per connection. Detection rates across repeated runs are close but not identical, because client-side timing still varies (see [Limitations](#limitations--protocol-edge-cases)).
 
-  To reproduce the benchmark figures locally:
+  To reproduce:
 
   ```bash
-  # 1. Baseline run (without fuzzer):
-  cargo run --release -p pg-interleave-server -- --listen-addr 127.0.0.1:5433
-  npx tsx examples/lost_update_benchmark.ts
-  # Output: 0-2/100 (baseline OS scheduling noise)
+  cd examples && npm install
 
-  # 2. Schedule fuzzer run with fixed seed:
+  # 1. Baseline run (without fuzzer)
+  cargo run --release -p pg-interleave-server -- --listen-addr 127.0.0.1:5433
+  npx tsx lost_update_benchmark.ts
+  # prints "Schedule Fuzzer: DISABLED", then roughly 0-2/100
+
+  # 2. Fuzzer run with a fixed seed
   cargo run --release -p pg-interleave-server -- --fuzz --seed 42 --fuzz-max-delay-ms 30
-  npx tsx examples/lost_update_benchmark.ts
-  # Output: 85-96/100 detected
+  npx tsx lost_update_benchmark.ts
+  # prints "Schedule Fuzzer: ENABLED", then roughly 85-96/100
   ```
 
-- **Latency Cost.** Every delayed query costs up to `--fuzz-max-delay-ms`, so keep the bound small (e.g., 20–30 ms) in CI.
-- **It finds, it does not prove.** Fuzzing samples schedules. A green run means these schedules passed, not that the code is race free. Run it with several seeds or in property-based test matrices.
+  The script reads `DATABASE_URL` (default: the local proxy on port 5433) and cleans up its table.
 
-## Trace Record & Replay
+- **Latency cost.** Every delayed query costs up to `--fuzz-max-delay-ms`. Keep the bound small (20–30 ms) in CI.
+- **It finds, it does not prove.** Fuzzing samples schedules. A green run means these schedules passed, not that the code is race free. Run it with several seeds.
 
-Record complex interleavings or concurrency race schedules discovered by the scheduler / fuzzer, and replay them deterministically in regression tests.
+## Trace record & replay
 
-### 1. Record an execution trace
+Record the schedule of a run, then replay it in a regression test.
+
+### 1. Record
 
 Start the proxy with `--record`:
 
@@ -392,21 +435,21 @@ Start the proxy with `--record`:
 cargo run --release -p pg-interleave-server -- --record trace.json
 ```
 
-During testing, save the current trace buffer to disk via the SDK or HTTP Control API:
+During the test, write the in-memory trace to disk through the SDK (or `POST /flush-trace`):
 
-```typescript
+```ts
 await chaos.flushTrace();
 ```
 
-### 2. Replay a recorded trace
+The trace is also the quickest way to see the exact SQL a library sends, which helps when writing a pattern.
 
-Rerun the test against the captured execution schedule:
+### 2. Replay
 
 ```bash
 cargo run --release -p pg-interleave-server -- --replay trace.json
 ```
 
-The proxy holds outgoing queries until their turn in the recorded schedule arrives, reproducing the captured statement order across connections.
+The proxy holds outgoing statements until their turn in the recorded schedule, so the captured statement order across connections is reproduced even if the clients start in a different order. This is exercised end to end in [`packages/sdk-ts/src/replay.test.ts`](packages/sdk-ts/src/replay.test.ts): the test sends the second connection's statements first and asserts that the recorded order still wins.
 
 ## HTTP control plane
 
@@ -414,48 +457,57 @@ The proxy holds outgoing queries until their turn in the recorded schedule arriv
 | ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
 | `POST /intercept`   | Add a rule: `{ query_pattern?, ast?: { operation?, table? }, target_pid?, session_tag?, with_params?, action?, times? }`. 400 on invalid regex. |
 | `GET /rules`        | List registered rules with their `fired_count` and `times_remaining`.                                                                           |
-| `GET /rules/:id`    | Get execution metrics and status for a specific rule. 404 if not found.                                                                         |
-| `GET /barriers`     | Active barriers held in proxy: `[ { "id": "barrier_1", "rule_id": "rule_1" } ]`.                                                                |
+| `GET /rules/:id`    | Execution metrics and status for one rule. 404 if not found.                                                                                    |
+| `GET /barriers`     | Active barriers held in the proxy: `[ { "id": "barrier_1", "rule_id": "rule_1" } ]`.                                                            |
 | `POST /resume/:id`  | Release one barrier by `barrier_id` or `rule_id`. 404 if unknown.                                                                               |
 | `POST /resume-next` | Release the oldest active barrier in FIFO order. 404 if none.                                                                                   |
-| `POST /flush-trace` | Flush current in-memory execution trace to file specified in `--record`.                                                                        |
-| `GET /events`       | Check proxy status: `{ "had_timeouts": bool, "fuzzer_enabled": bool }`.                                                                         |
-| `POST /reset`       | Remove every rule, release every barrier, and clear in-memory trace buffer.                                                                     |
+| `POST /flush-trace` | Flush the in-memory trace to the file given in `--record`.                                                                                      |
+| `GET /events`       | Proxy status: `{ "had_timeouts": bool, "fuzzer_enabled": bool }`.                                                                               |
+| `POST /reset`       | Remove every rule, release every barrier, clear the in-memory trace buffer.                                                                     |
 
 The control plane has **no authentication**. Keep it on `127.0.0.1`.
 
-## Comparison with Alternatives
+## Comparison with alternatives
 
-| Feature                          | pg-interleave                      | Toxiproxy                    | PostgreSQL `isolationtester`  | Application In-Memory Mocks |
-| :------------------------------- | :--------------------------------- | :--------------------------- | :---------------------------- | :-------------------------- |
-| **Layer**                        | **L7 (PostgreSQL Wire v3.0)**      | L4 (TCP stream)              | PostgreSQL Internals (C)      | In-Process / Runtime memory |
-| **Statement-Level Interception** | **Yes** (Regex, AST, `$1` params)  | No (all or nothing)          | Yes (spec scripts)            | No (mocked DB driver)       |
-| **Requires Code Changes**        | **No** (point DB URL to port 5433) | No                           | Yes (requires custom `.spec`) | Yes (heavy mock setup)      |
-| **Real ACID / Locks**            | **Yes** (real PostgreSQL engine)   | Yes                          | Yes                           | No (fake in-memory state)   |
-| **Torn Commit Injection**        | **Yes** (drop socket post-WAL)     | No (cannot inspect `COMMIT`) | No                            | No                          |
-| **Synthetic 40P01 Deadlocks**    | **Yes** (wire ErrorResponse)       | No                           | No                            | Partial (manual throw)      |
-| **Schedule Fuzzing & Replay**    | **Yes** (SplitMix64 + trace)       | No                           | No                            | No                          |
+| Feature                          | pg-interleave                      | Toxiproxy                    | PostgreSQL `isolationtester` | In-memory mocks        |
+| :------------------------------- | :--------------------------------- | :--------------------------- | :--------------------------- | :--------------------- |
+| **Layer**                        | L7 (PostgreSQL wire v3.0)          | L4 (TCP stream)              | PostgreSQL internals (C)     | In-process             |
+| **Statement-level interception** | Yes (regex, AST, `$1` params)      | No                           | Yes (spec scripts)           | No (mocked driver)     |
+| **Requires code changes**        | No (point the DB URL at port 5433) | No                           | Yes (custom `.spec` files)   | Yes (heavy mock setup) |
+| **Real ACID and locks**          | Yes (real PostgreSQL engine)       | Yes                          | Yes                          | No                     |
+| **Torn commit injection**        | Yes (drop socket after commit)     | No (cannot inspect `COMMIT`) | No                           | No                     |
+| **Synthetic 40P01 deadlocks**    | Yes (wire `ErrorResponse`)         | No                           | No                           | Partial (manual throw) |
+| **Schedule fuzzing and replay**  | Yes (SplitMix64 plus trace)        | No                           | No                           | No                     |
+
+Toxiproxy is the right tool for latency, bandwidth and connection-level faults on any TCP service. pg-interleave only speaks PostgreSQL, which is what lets it target a single statement.
 
 ## Limitations & Protocol Edge Cases
 
-`pg-interleave` operates as an L7 stateful proxy over the PostgreSQL Frontend/Backend Protocol v3.0. To use it reliably, keep the following architectural constraints in mind:
+pg-interleave is an L7 stateful proxy over the PostgreSQL Frontend/Backend Protocol v3.0. Keep these constraints in mind:
 
-- **TLS / SSL Termination:** The proxy inspects unencrypted PostgreSQL wire-protocol frames. It responds with `'N'` to all `SSLRequest` and `GSSENCRequest` packets during connection startup. Client configurations must allow plaintext connections (`sslmode=disable` or `sslmode=prefer`). Connecting with `sslmode=require` or `sslmode=verify-full` will immediately abort the client handshake.
-- **Extended Protocol Pipeline with `Flush` (`'H'`):** The proxy buffers incoming messages and evaluates interceptor barriers upon receiving a `Sync` (`'S'`) or `Simple Query` (`'Q'`) packet. Specialized drivers that use advanced pipelining and rely on explicit `Flush` (`'H'`) frames to read intermediate results before sending `Sync` can encounter socket deadlocks.
-- **Mutating Common Table Expressions (CTEs):** The AST selector inspects root-level SQL statements. In queries where a data-modifying clause is nested inside a CTE (such as `WITH moved AS (UPDATE inventory ...) SELECT * FROM moved`), the AST engine categorizes the statement as `SELECT`. For data-modifying CTEs, use regex pattern matching (`onQueryMatch`) instead of `ast`.
-- **Connection Poolers in Transaction Mode (PgBouncer / RDS Proxy):** When using PgBouncer in `pool_mode = transaction` (or Supabase Supavisor), physical server connections and backend PIDs (`pg_backend_pid()`) change between transactions on the same client pool. Target rules using `sessionTag` comments (`/* interleave: tag=workerA */`) rather than `clientPid`. Furthermore, avoid holding barriers longer than PgBouncer's `query_wait_timeout`.
-- **In-Memory Global State:** Interception rules, barrier queues, and connection mappings are shared across the proxy process. Integration test suites should either run test files serially (`vitest --fileParallelism=false`), issue `await chaos.reset()` between test cases, or assign distinct `sessionTag` markers to avoid cross-test rule collisions.
-- **Out-of-Band Statement Cancellation:** If a query is held by a `pause_before_query` barrier, it has not yet been forwarded to PostgreSQL. If the client concurrently opens a separate connection to issue a `CancelRequest` (80877102), PostgreSQL will have no knowledge of the backend query, and the cancellation will have no effect on the held barrier until it is either resumed or exceeds its `--barrier-ttl-ms`.
-- **Fuzzer Determinism Boundaries:** Passing `--seed <u64>` guarantees the exact same pseudo-random sequence of micro-delays injected by the proxy. However, client-side runtime scheduling (e.g., Node.js event loop latency, OS thread preemption, and disk write times) can still introduce slight millisecond variations in when queries reach the socket. Benchmark metrics reflect an empirical distribution rather than a hardware-clock lockstep.
+- **TLS / SSL.** The proxy inspects unencrypted wire-protocol frames. It answers `'N'` to every `SSLRequest` and `GSSENCRequest` during startup, so clients must allow plaintext (`sslmode=disable` or `sslmode=prefer`). `sslmode=require` and `sslmode=verify-full` abort the handshake.
+- **Extended protocol with `Flush` (`'H'`).** The proxy buffers messages and evaluates barriers when it receives `Sync` (`'S'`) or a simple `Query` (`'Q'`). Drivers that pipeline and rely on explicit `Flush` frames to read intermediate results before sending `Sync` can deadlock the socket.
+- **Data-modifying CTEs.** The AST selector inspects the root statement. For `WITH moved AS (UPDATE inventory ...) SELECT * FROM moved` the statement is classified as `SELECT`. Use a regex (`onQueryMatch`) for these.
+- **Connection poolers in transaction mode (PgBouncer, RDS Proxy, Supavisor).** Server connections and backend PIDs change between transactions, so target rules with `sessionTag` comments rather than `client`. Do not hold a barrier longer than the pooler's `query_wait_timeout`.
+- **Global in-memory state.** Rules, barrier queues and connection mappings are shared across the proxy process. Run test files serially (`vitest --fileParallelism=false`), call `await chaos.reset()` between tests, or use distinct `sessionTag` values.
+- **Out-of-band cancellation.** A statement held by `pause_before_query` has not reached PostgreSQL. A `CancelRequest` (80877102) from another connection therefore has no effect on the held barrier until it is resumed or exceeds `--barrier-ttl-ms`.
+- **Fuzzer determinism boundaries.** `--seed <u64>` fixes the sequence of delays the proxy injects. Client-side scheduling (Node.js event loop latency, OS preemption) still varies by milliseconds, so benchmark figures are an empirical distribution, not a lockstep replay.
 
 ## Development
 
 ```bash
 cargo fmt --check
-cargo clippy -p pg-interleave-server -- -D warnings
-cargo test                      # decoder unit and property tests
-cd packages/sdk-ts && npm test  # integration tests, needs Postgres + the proxy running
+cargo clippy --all-targets -- -D warnings
+cargo test                              # decoder unit and property tests
+
+# integration tests need Postgres and the proxy running on 5433/9090
+cd packages/sdk-ts && npm ci && npm test
+
+# pg-boss suite
+cd examples/pg-boss-exploration && npm install && npm test
 ```
+
+CI runs the test suite on a matrix of Node 18, 20, 22 and PostgreSQL 14, 15, 16. See [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request, and [SECURITY.md](SECURITY.md) to report a vulnerability.
 
 ## License
 

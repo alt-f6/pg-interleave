@@ -15,6 +15,7 @@ mod trace;
 #[derive(Parser, Debug)]
 #[command(
     name = "pg-interleave",
+    version,
     about = "Deterministic Postgres Proxy for integration tests"
 )]
 struct Args {
