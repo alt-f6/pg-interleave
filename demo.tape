@@ -1,4 +1,3 @@
-# Output settings
 Output demo.gif
 
 Set FontSize 15
@@ -10,7 +9,6 @@ Set Theme "Catppuccin Mocha"
 Set WindowBar Colorful
 Set LetterSpacing 0
 
-# Скрываем вход в папку из кадра
 Hide
 Type "cd packages/sdk-ts"
 Enter
@@ -19,12 +17,10 @@ Enter
 Sleep 500ms
 Show
 
-# 1. Deterministic Schedule Fuzzer (100% Lost Update detection)
 Type "npx vitest run src/fuzzer.test.ts"
 Enter
 Sleep 4.5s
 
-# 2. Интерактивная пауза запроса перед UPDATE
 Type "npx tsx src/demo.ts"
 Enter
 Sleep 7.5s

@@ -44,7 +44,7 @@ If your scenario can be written as plain sequential `await`s on two clients, you
 
 ## Install
 
-> Docker images, release binaries and the npm package are published with each GitHub release (latest: **v0.6.4**).
+> Docker images, release binaries and the npm package are published with each GitHub release (latest: **v0.7.0**).
 
 ### 1. Run the proxy
 
@@ -213,6 +213,11 @@ await chaos.injectTornCommit(client);
 await chaos.injectDeadlock({ client, onQueryMatch: /UPDATE seats/ });
 await chaos.hasTimeouts(); // true if any barrier hit its TTL
 ```
+
+### Query Matching Semantics
+
+- **Multiline & dotAll (`(?s)`):** SQL queries sent by ORMs and drivers are almost always multi-line. When passing a JavaScript `RegExp`, `pg-interleave` automatically enables single-line mode / dotAll (`(?s)` or `(?is)` if the `/i` flag is present). This guarantees that `.*` matches across `\n` without manual flags.
+- **Raw Strings:** If you pass a plain `string`, `(?s)` is prepended by default. If your string already starts with Rust inline flags (e.g. `(?is)...`), it is passed as-is.
 
 ### Connection Pool Compatibility (SQL Comment Routing)
 

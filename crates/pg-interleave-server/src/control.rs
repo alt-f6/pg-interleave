@@ -9,7 +9,9 @@ use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use tracing::info;
 
-use crate::barrier::{InterceptRule, InterceptRuleInput, RuleStatusDto, SharedState};
+use crate::barrier::{
+    ActiveBarrierSummary, InterceptRule, InterceptRuleInput, RuleStatusDto, SharedState,
+};
 
 #[derive(Serialize)]
 struct StatusResponse {
@@ -137,9 +139,10 @@ async fn get_rule_by_id_handler(
         .ok_or(StatusCode::NOT_FOUND)
 }
 
-async fn list_barriers_handler(State(state): State<SharedState>) -> impl IntoResponse {
-    let list = state.active_barrier_ids().await;
-    Json(list)
+async fn list_barriers_handler(
+    State(state): State<SharedState>,
+) -> Json<Vec<ActiveBarrierSummary>> {
+    Json(state.list_active_barriers().await)
 }
 
 async fn events_handler(State(state): State<SharedState>) -> impl IntoResponse {

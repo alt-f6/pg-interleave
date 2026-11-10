@@ -23,7 +23,8 @@ struct ConnectionState {
     statements: HashMap<String, String>,
     portals: HashMap<String, PortalData>,
     last_tx_status: u8,
-    pending_pause_after: bool,
+    pending_pause_after_rule: Option<String>,
+    pending_drop_on_commit: bool,
     response_buffer: Vec<u8>,
 }
 
@@ -33,7 +34,8 @@ impl ConnectionState {
             statements: HashMap::new(),
             portals: HashMap::new(),
             last_tx_status: b'I',
-            pending_pause_after: false,
+            pending_pause_after_rule: None,
+            pending_drop_on_commit: false,
             response_buffer: Vec::new(),
         }
     }
@@ -203,19 +205,23 @@ async fn handle_connection(
 
                                 if m.tag == Some(b'C') {
                                     let payload_str = String::from_utf8_lossy(&m.payload);
-                                    if payload_str.starts_with("COMMIT")
-                                        && state.should_drop_on_commit(server_pid, None, &payload_str).await
+                                    let is_commit_tag = payload_str.starts_with("COMMIT");
+                                    let is_autocommit = conn_scope.last_tx_status != b'T';
+
+                                    if (conn_scope.pending_drop_on_commit && (is_commit_tag || is_autocommit))
+                                        || (is_commit_tag && state.should_drop_on_commit(server_pid, None, &payload_str).await)
                                     {
+                                        conn_scope.pending_drop_on_commit = false;
                                         warn!(conn_id, "CHAOS: Forcing TCP connection drop right after database COMMIT!");
                                         return Ok(());
                                     }
                                 }
 
-                                if conn_scope.pending_pause_after {
+                                if let Some(rule_id) = conn_scope.pending_pause_after_rule.clone() {
                                     conn_scope.response_buffer.extend_from_slice(&m.to_bytes());
                                     if m.tag == Some(b'Z') {
-                                        conn_scope.pending_pause_after = false;
-                                        let (barrier_id, rx) = state.create_manual_barrier().await;
+                                        conn_scope.pending_pause_after_rule = None;
+                                        let (barrier_id, rx) = state.create_manual_barrier_with_rule(Some(rule_id)).await;
                                         info!(conn_id, barrier_id = %barrier_id, "PauseAfterResponse reached ReadyForQuery, holding response buffer...");
 
                                         let cleanup_state = state.clone();
@@ -363,7 +369,7 @@ where
             return Ok(());
         }
 
-        if let Some(_rule) = state
+        if let Some(rule) = state
             .check_action_match(
                 server_pid,
                 session_tag.as_deref(),
@@ -373,7 +379,20 @@ where
             )
             .await
         {
-            conn_scope.pending_pause_after = true;
+            conn_scope.pending_pause_after_rule = Some(rule.id);
+        }
+
+        if let Some(_rule) = state
+            .check_action_match(
+                server_pid,
+                session_tag.as_deref(),
+                sql,
+                BarrierAction::DropConnectionOnCommit,
+                params,
+            )
+            .await
+        {
+            conn_scope.pending_drop_on_commit = true;
         }
 
         if let Some((barrier_id, receiver)) = state

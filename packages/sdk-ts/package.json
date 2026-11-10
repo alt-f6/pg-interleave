@@ -1,6 +1,6 @@
 {
   "name": "pg-interleave",
-  "version": "0.6.4",
+  "version": "0.7.0c",
   "description": "Deterministic PostgreSQL wire-protocol proxy client for concurrency and chaos testing",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -12,6 +12,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
+    "prepare": "npm run build",
     "prepublishOnly": "npm run build",
     "typecheck": "tsc --noEmit",
     "test": "vitest run --fileParallelism=false"

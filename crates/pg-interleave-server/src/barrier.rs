@@ -5,6 +5,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 use tokio::sync::{Mutex, oneshot};
 use tracing::info;
 
@@ -219,19 +220,27 @@ impl ConnFuzzer {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActiveBarrierSummary {
+    pub id: String,
+    pub rule_id: String,
+}
+
+#[derive(Debug)]
 pub struct ActiveBarrier {
     #[allow(dead_code)]
-    pub id: u64,
-    #[allow(dead_code)]
-    pub rule: InterceptRule,
-    pub resume_sender: Option<oneshot::Sender<()>>,
+    pub id: String,
+    pub rule_id: String,
+    pub reached_at: Instant,
+    pub resume_sender: oneshot::Sender<()>,
 }
 
 #[derive(Default)]
 pub struct BarrierState {
     pub rules: Vec<InterceptRule>,
     pub finished_rules: Vec<RuleStatusDto>,
-    pub active_barriers: BTreeMap<u64, ActiveBarrier>,
+    pub active_barriers: BTreeMap<String, ActiveBarrier>,
+    pub next_barrier_id: u64,
     pub pid_to_conn: HashMap<u32, u64>,
     pub client_statements: HashMap<u64, HashMap<String, String>>,
     pub had_timeouts: bool,
@@ -254,10 +263,12 @@ impl SharedState {
         replayer: Option<Arc<TraceReplayer>>,
     ) -> Self {
         let fuzzer = fuzz_seed.map(|seed| Fuzzer::new(seed, fuzz_max_delay_ms));
-        let state = BarrierState {
+        let mut state = BarrierState {
             fuzzer,
             ..BarrierState::default()
         };
+        state.next_barrier_id = 1;
+
         Self {
             inner: Arc::new(Mutex::new(state)),
             barrier_counter: Arc::new(AtomicU64::new(1)),
@@ -293,10 +304,8 @@ impl SharedState {
 
     pub async fn reset(&self) {
         let mut state = self.inner.lock().await;
-        for (_, barrier) in state.active_barriers.split_off(&0) {
-            if let Some(sender) = barrier.resume_sender {
-                let _ = sender.send(());
-            }
+        for (_, barrier) in std::mem::take(&mut state.active_barriers) {
+            let _ = barrier.resume_sender.send(());
         }
         state.rules.clear();
         state.finished_rules.clear();
@@ -464,20 +473,20 @@ impl SharedState {
                 });
             }
 
-            let numeric_id = self.barrier_counter.fetch_add(1, Ordering::SeqCst);
-            let barrier_id = format!("barrier_{}", numeric_id);
+            let barrier_id = format!("barrier_{}", state.next_barrier_id);
+            state.next_barrier_id += 1;
             let (tx, rx) = oneshot::channel();
 
-            state.active_barriers.insert(
-                numeric_id,
-                ActiveBarrier {
-                    id: numeric_id,
-                    rule,
-                    resume_sender: Some(tx),
-                },
-            );
+            let active = ActiveBarrier {
+                id: barrier_id.clone(),
+                rule_id: rule.id.clone(),
+                reached_at: Instant::now(),
+                resume_sender: tx,
+            };
 
-            info!(barrier_id = %barrier_id, query = %query, "Barrier reached!");
+            state.active_barriers.insert(barrier_id.clone(), active);
+
+            info!(barrier_id = %barrier_id, rule_id = %rule.id, query = %query, "Barrier reached!");
             return Some((barrier_id, rx));
         }
 
@@ -544,33 +553,30 @@ impl SharedState {
         None
     }
 
+    #[allow(dead_code)]
     pub async fn create_manual_barrier(&self) -> (String, oneshot::Receiver<()>) {
+        self.create_manual_barrier_with_rule(None).await
+    }
+
+    pub async fn create_manual_barrier_with_rule(
+        &self,
+        rule_id: Option<String>,
+    ) -> (String, oneshot::Receiver<()>) {
         let mut state = self.inner.lock().await;
-        let numeric_id = self.barrier_counter.fetch_add(1, Ordering::SeqCst);
-        let barrier_id = format!("barrier_{}", numeric_id);
+        let barrier_id = format!("barrier_{}", state.next_barrier_id);
+        state.next_barrier_id += 1;
         let (tx, rx) = oneshot::channel();
 
-        let dummy_rule = InterceptRule {
-            id: format!("rule_manual_{}", numeric_id),
-            target_pid: None,
-            session_tag: None,
-            query_pattern: Some("manual".to_string()),
-            compiled_regex: Regex::new(".*").ok(),
-            ast_selector: None,
-            with_params: None,
-            action: BarrierAction::PauseAfterResponse,
-            times: Some(1),
-            fired_count: 0,
+        let active_barrier = ActiveBarrier {
+            id: barrier_id.clone(),
+            rule_id: rule_id.unwrap_or_else(|| format!("rule_manual_{}", barrier_id)),
+            reached_at: Instant::now(),
+            resume_sender: tx,
         };
 
-        state.active_barriers.insert(
-            numeric_id,
-            ActiveBarrier {
-                id: numeric_id,
-                rule: dummy_rule,
-                resume_sender: Some(tx),
-            },
-        );
+        state
+            .active_barriers
+            .insert(barrier_id.clone(), active_barrier);
 
         (barrier_id, rx)
     }
@@ -627,48 +633,87 @@ impl SharedState {
         should_drop
     }
 
-    pub async fn resume_barrier(&self, barrier_str: &str) -> bool {
-        let numeric_id: u64 = if let Some(stripped) = barrier_str.strip_prefix("barrier_") {
-            stripped.parse().unwrap_or(0)
-        } else {
-            barrier_str.parse().unwrap_or(0)
-        };
-
+    pub async fn resume_barrier(&self, id_or_rule_id: &str) -> bool {
         let mut state = self.inner.lock().await;
-        if let Some(mut barrier) = state.active_barriers.remove(&numeric_id)
-            && let Some(tx) = barrier.resume_sender.take()
-        {
-            let _ = tx.send(());
-            info!(barrier_id = %barrier_str, "Barrier released successfully");
+        if let Some(barrier) = state.active_barriers.remove(id_or_rule_id) {
+            let _ = barrier.resume_sender.send(());
+            info!(barrier_id = %id_or_rule_id, "Barrier released successfully");
             return true;
         }
+
+        let key_to_remove = state
+            .active_barriers
+            .iter()
+            .filter(|(_, b)| b.rule_id == id_or_rule_id)
+            .min_by_key(|(_, b)| b.reached_at)
+            .map(|(k, _)| k.clone());
+
+        if let Some(key) = key_to_remove
+            && let Some(barrier) = state.active_barriers.remove(&key)
+        {
+            let _ = barrier.resume_sender.send(());
+            info!(barrier_id = %key, rule_id = %id_or_rule_id, "Barrier released successfully via rule_id");
+            return true;
+        }
+
+        let found_key = state
+            .active_barriers
+            .keys()
+            .find(|k| {
+                k.strip_prefix("barrier_") == Some(id_or_rule_id)
+                    || id_or_rule_id.strip_prefix("barrier_") == Some(k.as_str())
+            })
+            .cloned();
+
+        if let Some(key) = found_key
+            && let Some(barrier) = state.active_barriers.remove(&key)
+        {
+            let _ = barrier.resume_sender.send(());
+            info!(barrier_id = %key, "Barrier released successfully via fallback key match");
+            return true;
+        }
+
         false
     }
 
-    pub async fn resume_first(&self) -> Option<String> {
+    pub async fn resume_next_barrier(&self) -> Option<String> {
         let mut state = self.inner.lock().await;
-        let first_id = *state.active_barriers.first_key_value()?.0;
-        if let Some(mut barrier) = state.active_barriers.remove(&first_id)
-            && let Some(tx) = barrier.resume_sender.take()
+        let oldest_key = state
+            .active_barriers
+            .iter()
+            .min_by_key(|(_, b)| b.reached_at)
+            .map(|(k, _)| k.clone());
+
+        if let Some(key) = oldest_key
+            && let Some(barrier) = state.active_barriers.remove(&key)
         {
-            let _ = tx.send(());
-            let barrier_id = format!("barrier_{}", first_id);
-            info!(barrier_id = %barrier_id, "First active barrier in queue released successfully");
-            return Some(barrier_id);
+            let _ = barrier.resume_sender.send(());
+            info!(barrier_id = %key, "Next oldest barrier released successfully");
+            return Some(key);
         }
         None
     }
 
-    pub async fn record_timeout(&self, barrier_str: &str) {
-        let numeric_id: u64 = if let Some(stripped) = barrier_str.strip_prefix("barrier_") {
-            stripped.parse().unwrap_or(0)
-        } else {
-            barrier_str.parse().unwrap_or(0)
-        };
+    pub async fn resume_first(&self) -> Option<String> {
+        self.resume_next_barrier().await
+    }
 
+    pub async fn record_timeout(&self, barrier_id: &str) {
         let mut state = self.inner.lock().await;
         state.had_timeouts = true;
-        state.active_barriers.remove(&numeric_id);
+        if state.active_barriers.remove(barrier_id).is_some() {
+            return;
+        }
+
+        let key_to_remove = state
+            .active_barriers
+            .iter()
+            .find(|(k, b)| *k == barrier_id || b.rule_id == barrier_id)
+            .map(|(k, _)| k.clone());
+
+        if let Some(k) = key_to_remove {
+            state.active_barriers.remove(&k);
+        }
     }
 
     pub async fn has_timeouts(&self) -> bool {
@@ -676,13 +721,22 @@ impl SharedState {
         state.had_timeouts
     }
 
-    pub async fn active_barrier_ids(&self) -> Vec<String> {
+    pub async fn list_active_barriers(&self) -> Vec<ActiveBarrierSummary> {
         let state = self.inner.lock().await;
         state
             .active_barriers
-            .keys()
-            .map(|id| format!("barrier_{}", id))
+            .values()
+            .map(|b| ActiveBarrierSummary {
+                id: b.id.clone(),
+                rule_id: b.rule_id.clone(),
+            })
             .collect()
+    }
+
+    #[allow(dead_code)]
+    pub async fn active_barrier_ids(&self) -> Vec<String> {
+        let state = self.inner.lock().await;
+        state.active_barriers.keys().cloned().collect()
     }
 
     pub async fn cleanup_connection(&self, conn_id: u64, pid: Option<u32>) {

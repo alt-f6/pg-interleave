@@ -18,10 +18,19 @@ export interface AstSelector {
 export type BarrierAction =
   | "PAUSE_BEFORE_QUERY"
   | "PAUSE_AFTER_RESPONSE"
+  | "DROP_CONNECTION_ON_COMMIT"
+  | "SYNTHETIC_DEADLOCK"
   | "pause_before_query"
-  | "pause_after_response";
+  | "pause_after_response"
+  | "drop_connection_on_commit"
+  | "synthetic_deadlock";
 
 export type ParamValue = string | number | boolean | null;
+
+export interface ActiveBarrierInfo {
+  id: string;
+  rule_id: string;
+}
 
 export interface InterceptOptions {
   client?: Client;
@@ -40,86 +49,50 @@ export interface RuleStatusDto {
   times_remaining?: number | null;
 }
 
-export function regexToRustPattern(regex: RegExp | string): string {
-  if (typeof regex === "string") {
-    return regex.startsWith("(?") ? regex : `(?s)${regex}`;
-  }
-
-  let flags = "";
-  if (regex.ignoreCase) flags += "i";
-  if (regex.multiline) flags += "m";
-  flags += "s";
-
-  const uniqueFlags = Array.from(new Set(flags.split(""))).join("");
-  return `(?${uniqueFlags})${regex.source}`;
-}
-
-export interface RuleHandle {
-  id: string;
-  assertFired(minTimes?: number): Promise<void>;
-  getFiredCount(): Promise<number>;
-}
-
-export class DefaultRuleHandle implements RuleHandle {
-  constructor(
-    protected readonly client: PgInterleaveClient,
-    public readonly id: string
-  ) {}
-
-  async getFiredCount(): Promise<number> {
-    return this.client.getRuleFiredCount(this.id);
-  }
-
-  async assertFired(minTimes = 1): Promise<void> {
-    const count = await this.getFiredCount();
-    if (count < minTimes) {
-      throw new Error(
-        `Assertion failed: Rule '${this.id}' was expected to fire at least ${minTimes} time(s), but fired ${count} time(s). Check your SQL pattern and newlines.`
-      );
+export function regexToRustPattern(pattern: RegExp | string): string {
+  if (typeof pattern === "string") {
+    if (pattern.startsWith("(?")) {
+      return pattern;
     }
+    return `(?s)${pattern}`;
   }
+
+  const flags = pattern.flags;
+  const isCaseInsensitive = flags.includes("i");
+  const rustFlags = isCaseInsensitive ? "(?is)" : "(?s)";
+
+  return `${rustFlags}${pattern.source}`;
 }
 
-export class BarrierHandle implements RuleHandle {
+export class InterceptHandle {
   constructor(
-    private readonly client: PgInterleaveClient,
     public readonly id: string,
+    private readonly client: PgInterleaveClient,
     public readonly barrierId?: string
   ) {}
 
-  async wait(timeoutMs = 5000): Promise<void> {
-    const start = Date.now();
-    while (Date.now() - start < timeoutMs) {
-      const active = await this.client.barriers();
-      if (this.barrierId) {
-        if (active.includes(this.barrierId)) return;
-      } else if (active.length > 0) {
-        return;
-      }
-      await new Promise((r) => setTimeout(r, 20));
+  async getFiredCount(): Promise<number> {
+    const stats = await this.client.getRuleStats(this.id);
+    return stats?.fired_count ?? 0;
+  }
+
+  async assertFired(expectedCount = 1): Promise<void> {
+    const actual = await this.getFiredCount();
+    if (actual !== expectedCount) {
+      throw new Error(
+        `[pg-interleave] Rule assertion failed for rule "${this.id}": ` +
+        `expected to fire ${expectedCount} time(s), but fired ${actual} time(s). ` +
+        `Check your SQL regex pattern or verify whether the query actually reached the proxy.`
+      );
     }
-    throw new Error(`Timeout waiting for barrier to be reached (${timeoutMs}ms)`);
   }
 
   async resume(): Promise<void> {
-    if (this.barrierId) {
-      await this.client.resume(this.barrierId);
-    } else {
-      await this.client.resumeNext();
-    }
+    await this.client.resume(this.barrierId ?? this.id);
   }
 
-  async getFiredCount(): Promise<number> {
-    return this.client.getRuleFiredCount(this.id);
-  }
-
-  async assertFired(minTimes = 1): Promise<void> {
-    const count = await this.getFiredCount();
-    if (count < minTimes) {
-      throw new Error(
-        `Assertion failed: Rule '${this.id}' was expected to fire at least ${minTimes} time(s), but fired ${count} time(s). Check your SQL pattern and newlines.`
-      );
-    }
+  async wait(timeoutMs = 5000): Promise<void> {
+    await this.client.waitForBarrier(this.barrierId ?? this.id, timeoutMs);
   }
 }
 
@@ -137,12 +110,12 @@ export class PgInterleaveClient {
     }
   }
 
-  async resume(barrierId: string): Promise<void> {
-    const res = await fetch(`${this.controlUrl}/resume/${barrierId}`, {
+  async resume(targetId: string): Promise<void> {
+    const res = await fetch(`${this.controlUrl}/resume/${targetId}`, {
       method: "POST",
     });
     if (!res.ok) {
-      throw new Error(`Failed to resume barrier '${barrierId}': HTTP ${res.status}`);
+      throw new Error(`Failed to resume target '${targetId}': HTTP ${res.status}`);
     }
   }
 
@@ -156,20 +129,40 @@ export class PgInterleaveClient {
     return (await res.json()) as { status: string; barrier_id?: string };
   }
 
-  async barriers(): Promise<string[]> {
+  async barriers(): Promise<ActiveBarrierInfo[]> {
     const res = await fetch(`${this.controlUrl}/barriers`);
     if (!res.ok) {
       throw new Error(`Failed to fetch active barriers: HTTP ${res.status}`);
     }
-    return (await res.json()) as string[];
+    const data = await res.json();
+    return data.map((b: any) =>
+      typeof b === "string" ? { id: b, rule_id: b } : b
+    );
+  }
+
+  async waitForBarrier(targetId: string, timeoutMs = 5000): Promise<void> {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      const list = await this.barriers();
+      const found = list.some(
+        (b) => b.id === targetId || b.rule_id === targetId
+      );
+      if (found) return;
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    throw new Error(`Timeout waiting for barrier '${targetId}' to be reached (${timeoutMs}ms)`);
+  }
+
+  async getRuleStats(ruleId: string): Promise<RuleStatusDto | null> {
+    const res = await fetch(`${this.controlUrl}/rules`);
+    if (!res.ok) return null;
+    const rules = (await res.json()) as RuleStatusDto[];
+    return rules.find((r) => r.id === ruleId) ?? null;
   }
 
   async getRuleFiredCount(ruleId: string): Promise<number> {
-    const res = await fetch(`${this.controlUrl}/rules`);
-    if (!res.ok) return 0;
-    const rules = (await res.json()) as Array<{ id: string; fired_count: number }>;
-    const rule = rules.find((r) => r.id === ruleId);
-    return rule ? rule.fired_count : 0;
+    const stats = await this.getRuleStats(ruleId);
+    return stats?.fired_count ?? 0;
   }
 
   async hasTimeouts(): Promise<boolean> {
@@ -186,7 +179,7 @@ export class PgInterleaveClient {
     return res.rows[0].pid;
   }
 
-  async intercept(options: InterceptOptions): Promise<BarrierHandle> {
+  async intercept(options: InterceptOptions): Promise<InterceptHandle> {
     if (!options.onQueryMatch && !options.ast) {
       throw new Error("Either 'onQueryMatch' or 'ast' selector must be provided");
     }
@@ -230,10 +223,10 @@ export class PgInterleaveClient {
 
     const data = (await res.json()) as { rule_id?: string; barrier_id?: string };
     const id = data.rule_id || data.barrier_id || "rule";
-    return new BarrierHandle(this, id, data.barrier_id);
+    return new InterceptHandle(id, this, data.barrier_id);
   }
 
-  async injectTornCommit(client: Client, times = 1): Promise<RuleHandle> {
+  async injectTornCommit(client: Client, times = 1): Promise<InterceptHandle> {
     const pid = await this.getPid(client);
     const res = await fetch(`${this.controlUrl}/intercept`, {
       method: "POST",
@@ -252,7 +245,7 @@ export class PgInterleaveClient {
 
     const data = (await res.json()) as { rule_id?: string };
     const id = data.rule_id || "rule";
-    return new DefaultRuleHandle(this, id);
+    return new InterceptHandle(id, this);
   }
 
   async flushTrace(): Promise<void> {
@@ -269,7 +262,7 @@ export class PgInterleaveClient {
     clientPid?: number;
     onQueryMatch: string | RegExp;
     times?: number;
-  }): Promise<RuleHandle> {
+  }): Promise<InterceptHandle> {
     let pid = options.clientPid;
     if (!pid && options.client) {
       pid = await this.getPid(options.client);
@@ -294,6 +287,6 @@ export class PgInterleaveClient {
 
     const data = (await res.json()) as { rule_id?: string };
     const id = data.rule_id || "rule";
-    return new DefaultRuleHandle(this, id);
+    return new InterceptHandle(id, this);
   }
 }
