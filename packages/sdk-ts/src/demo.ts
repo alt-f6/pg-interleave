@@ -4,6 +4,7 @@ import { PgInterleaveClient } from "./index";
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 async function runDemo() {
+  
   const chaos = new PgInterleaveClient("http://127.0.0.1:9090");
   const connStr = "postgres://postgres:postgres@127.0.0.1:5433/postgres";
 
@@ -47,6 +48,9 @@ async function runDemo() {
   console.log("\x1b[33m[barrier]\x1b[0m Releasing barrier: barrier.resume()...");
   await barrier.resume();
   await pendingUpdate;
+
+  await barrier.assertFired(1);
+  console.log("\x1b[32m[barrier]\x1b[0m Interception verified: \x1b[1massertFired(1)\x1b[0m passed.");
   console.log("\x1b[32m[workerA]\x1b[0m UPDATE finished successfully.");
 
   const afterResume = await observer.query("SELECT balance FROM accounts WHERE id = 1");
