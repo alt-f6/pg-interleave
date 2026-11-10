@@ -22,8 +22,16 @@ pub enum BarrierAction {
     SyntheticDeadlock,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuleStatusDto {
+    pub id: String,
+    pub fired_count: u32,
+    pub times_remaining: Option<u32>,
+}
+
 #[derive(Debug, Clone)]
 pub struct InterceptRule {
+    pub id: String,
     pub target_pid: Option<u32>,
     pub session_tag: Option<String>,
     #[allow(dead_code)]
@@ -33,6 +41,7 @@ pub struct InterceptRule {
     pub with_params: Option<Vec<serde_json::Value>>,
     pub action: BarrierAction,
     pub times: Option<u32>,
+    pub fired_count: u32,
 }
 
 #[derive(Deserialize)]
@@ -70,6 +79,7 @@ impl TryFrom<InterceptRuleInput> for InterceptRule {
         };
 
         Ok(Self {
+            id: String::new(),
             target_pid: input.target_pid,
             session_tag: input.session_tag,
             query_pattern: input.query_pattern,
@@ -78,6 +88,7 @@ impl TryFrom<InterceptRuleInput> for InterceptRule {
             with_params: input.with_params,
             action: input.action,
             times: input.times,
+            fired_count: 0,
         })
     }
 }
@@ -219,6 +230,7 @@ pub struct ActiveBarrier {
 #[derive(Default)]
 pub struct BarrierState {
     pub rules: Vec<InterceptRule>,
+    pub finished_rules: Vec<RuleStatusDto>,
     pub active_barriers: BTreeMap<u64, ActiveBarrier>,
     pub pid_to_conn: HashMap<u32, u64>,
     pub client_statements: HashMap<u64, HashMap<String, String>>,
@@ -287,6 +299,7 @@ impl SharedState {
             }
         }
         state.rules.clear();
+        state.finished_rules.clear();
         state.client_statements.clear();
         state.had_timeouts = false;
         drop(state);
@@ -298,9 +311,31 @@ impl SharedState {
         info!("Barrier state reset successfully");
     }
 
-    pub async fn add_rule(&self, rule: InterceptRule) {
+    pub async fn add_rule(&self, mut rule: InterceptRule) -> String {
         let mut state = self.inner.lock().await;
+        let rule_id = format!(
+            "rule_{}",
+            self.barrier_counter.fetch_add(1, Ordering::SeqCst)
+        );
+        rule.id = rule_id.clone();
+        rule.fired_count = 0;
         state.rules.push(rule);
+        rule_id
+    }
+
+    pub async fn get_rules_status(&self) -> Vec<RuleStatusDto> {
+        let state = self.inner.lock().await;
+        let mut result: Vec<RuleStatusDto> = state
+            .rules
+            .iter()
+            .map(|r| RuleStatusDto {
+                id: r.id.clone(),
+                fired_count: r.fired_count,
+                times_remaining: r.times,
+            })
+            .collect();
+        result.extend(state.finished_rules.clone());
+        result
     }
 
     pub async fn register_pid(&self, pid: u32, conn_id: u64) {
@@ -353,6 +388,7 @@ impl SharedState {
         if let Some(idx) = matched_index {
             let should_remove = {
                 let rule = &mut state.rules[idx];
+                rule.fired_count += 1;
                 if let Some(ref mut count) = rule.times {
                     *count = count.saturating_sub(1);
                     *count == 0
@@ -361,7 +397,12 @@ impl SharedState {
                 }
             };
             if should_remove {
-                state.rules.remove(idx);
+                let removed = state.rules.remove(idx);
+                state.finished_rules.push(RuleStatusDto {
+                    id: removed.id,
+                    times_remaining: removed.times,
+                    fired_count: removed.fired_count,
+                });
             }
             return true;
         }
@@ -403,9 +444,9 @@ impl SharedState {
         }
 
         if let Some(idx) = matched_index {
-            let rule = state.rules[idx].clone();
             let should_remove = {
                 let rule_mut = &mut state.rules[idx];
+                rule_mut.fired_count += 1;
                 if let Some(ref mut count) = rule_mut.times {
                     *count = count.saturating_sub(1);
                     *count == 0
@@ -413,8 +454,14 @@ impl SharedState {
                     false
                 }
             };
+            let rule = state.rules[idx].clone();
             if should_remove {
-                state.rules.remove(idx);
+                let removed = state.rules.remove(idx);
+                state.finished_rules.push(RuleStatusDto {
+                    id: removed.id,
+                    times_remaining: removed.times,
+                    fired_count: removed.fired_count,
+                });
             }
 
             let numeric_id = self.barrier_counter.fetch_add(1, Ordering::SeqCst);
@@ -472,9 +519,9 @@ impl SharedState {
         }
 
         if let Some(idx) = matched_index {
-            let rule = state.rules[idx].clone();
             let should_remove = {
                 let rule_mut = &mut state.rules[idx];
+                rule_mut.fired_count += 1;
                 if let Some(ref mut count) = rule_mut.times {
                     *count = count.saturating_sub(1);
                     *count == 0
@@ -482,8 +529,14 @@ impl SharedState {
                     false
                 }
             };
+            let rule = state.rules[idx].clone();
             if should_remove {
-                state.rules.remove(idx);
+                let removed = state.rules.remove(idx);
+                state.finished_rules.push(RuleStatusDto {
+                    id: removed.id,
+                    times_remaining: removed.times,
+                    fired_count: removed.fired_count,
+                });
             }
             return Some(rule);
         }
@@ -498,6 +551,7 @@ impl SharedState {
         let (tx, rx) = oneshot::channel();
 
         let dummy_rule = InterceptRule {
+            id: format!("rule_manual_{}", numeric_id),
             target_pid: None,
             session_tag: None,
             query_pattern: Some("manual".to_string()),
@@ -506,6 +560,7 @@ impl SharedState {
             with_params: None,
             action: BarrierAction::PauseAfterResponse,
             times: Some(1),
+            fired_count: 0,
         };
 
         state.active_barriers.insert(
@@ -528,6 +583,7 @@ impl SharedState {
     ) -> bool {
         let mut state = self.inner.lock().await;
         let mut should_drop = false;
+        let mut finished = Vec::new();
 
         state.rules.retain_mut(|rule| {
             if rule.action == BarrierAction::DropConnectionOnCommit {
@@ -543,16 +599,31 @@ impl SharedState {
                 }
                 if rule.matches_query(commit_tag) {
                     should_drop = true;
+                    rule.fired_count += 1;
                     if let Some(ref mut count) = rule.times {
                         *count = count.saturating_sub(1);
-                        return *count > 0;
+                        if *count == 0 {
+                            finished.push(RuleStatusDto {
+                                id: rule.id.clone(),
+                                times_remaining: rule.times,
+                                fired_count: rule.fired_count,
+                            });
+                            return false;
+                        }
+                        return true;
                     }
+                    finished.push(RuleStatusDto {
+                        id: rule.id.clone(),
+                        times_remaining: rule.times,
+                        fired_count: rule.fired_count,
+                    });
                     return false;
                 }
             }
             true
         });
 
+        state.finished_rules.extend(finished);
         should_drop
     }
 

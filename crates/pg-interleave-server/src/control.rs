@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use tracing::info;
 
-use crate::barrier::{InterceptRule, InterceptRuleInput, SharedState};
+use crate::barrier::{InterceptRule, InterceptRuleInput, RuleStatusDto, SharedState};
 
 #[derive(Serialize)]
 struct StatusResponse {
@@ -48,6 +48,8 @@ pub async fn run_control_server(addr: SocketAddr, state: SharedState) -> anyhow:
     let app = Router::new()
         .route("/reset", post(reset_handler))
         .route("/intercept", post(intercept_handler))
+        .route("/rules", get(list_rules_handler))
+        .route("/rules/:id", get(get_rule_by_id_handler))
         .route(
             "/barriers",
             get(list_barriers_handler).post(list_barriers_handler),
@@ -106,10 +108,10 @@ async fn intercept_handler(
 
     match InterceptRule::try_from(input) {
         Ok(rule) => {
-            state.add_rule(rule).await;
+            let rule_id = state.add_rule(rule).await;
             (
                 StatusCode::OK,
-                Json(serde_json::json!({ "status": "rule_added" })),
+                Json(serde_json::json!({ "status": "rule_added", "rule_id": rule_id })),
             )
         }
         Err(err) => (
@@ -117,6 +119,22 @@ async fn intercept_handler(
             Json(serde_json::json!({ "error": err.to_string() })),
         ),
     }
+}
+
+async fn list_rules_handler(State(state): State<SharedState>) -> Json<Vec<RuleStatusDto>> {
+    Json(state.get_rules_status().await)
+}
+
+async fn get_rule_by_id_handler(
+    State(state): State<SharedState>,
+    Path(rule_id): Path<String>,
+) -> Result<Json<RuleStatusDto>, StatusCode> {
+    let rules = state.get_rules_status().await;
+    rules
+        .into_iter()
+        .find(|r| r.id == rule_id)
+        .map(Json)
+        .ok_or(StatusCode::NOT_FOUND)
 }
 
 async fn list_barriers_handler(State(state): State<SharedState>) -> impl IntoResponse {

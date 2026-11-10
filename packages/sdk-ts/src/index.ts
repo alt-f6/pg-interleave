@@ -34,23 +34,67 @@ export interface InterceptOptions {
   times?: number;
 }
 
-export class BarrierHandle {
+export interface RuleStatusDto {
+  id: string;
+  fired_count: number;
+  times_remaining?: number | null;
+}
+
+export function regexToRustPattern(regex: RegExp | string): string {
+  if (typeof regex === "string") {
+    return regex.startsWith("(?") ? regex : `(?s)${regex}`;
+  }
+
+  let flags = "";
+  if (regex.ignoreCase) flags += "i";
+  if (regex.multiline) flags += "m";
+  flags += "s";
+
+  const uniqueFlags = Array.from(new Set(flags.split(""))).join("");
+  return `(?${uniqueFlags})${regex.source}`;
+}
+
+export interface RuleHandle {
+  id: string;
+  assertFired(minTimes?: number): Promise<void>;
+  getFiredCount(): Promise<number>;
+}
+
+export class DefaultRuleHandle implements RuleHandle {
   constructor(
-    private readonly controlUrl: string,
+    protected readonly client: PgInterleaveClient,
+    public readonly id: string
+  ) {}
+
+  async getFiredCount(): Promise<number> {
+    return this.client.getRuleFiredCount(this.id);
+  }
+
+  async assertFired(minTimes = 1): Promise<void> {
+    const count = await this.getFiredCount();
+    if (count < minTimes) {
+      throw new Error(
+        `Assertion failed: Rule '${this.id}' was expected to fire at least ${minTimes} time(s), but fired ${count} time(s). Check your SQL pattern and newlines.`
+      );
+    }
+  }
+}
+
+export class BarrierHandle implements RuleHandle {
+  constructor(
+    private readonly client: PgInterleaveClient,
+    public readonly id: string,
     public readonly barrierId?: string
   ) {}
 
   async wait(timeoutMs = 5000): Promise<void> {
     const start = Date.now();
     while (Date.now() - start < timeoutMs) {
-      const res = await fetch(`${this.controlUrl}/barriers`);
-      if (res.ok) {
-        const barriers = (await res.json()) as string[];
-        if (this.barrierId) {
-          if (barriers.includes(this.barrierId)) return;
-        } else if (barriers.length > 0) {
-          return;
-        }
+      const active = await this.client.barriers();
+      if (this.barrierId) {
+        if (active.includes(this.barrierId)) return;
+      } else if (active.length > 0) {
+        return;
       }
       await new Promise((r) => setTimeout(r, 20));
     }
@@ -58,19 +102,29 @@ export class BarrierHandle {
   }
 
   async resume(): Promise<void> {
-    const url = this.barrierId
-      ? `${this.controlUrl}/resume/${this.barrierId}`
-      : `${this.controlUrl}/resume-next`;
+    if (this.barrierId) {
+      await this.client.resume(this.barrierId);
+    } else {
+      await this.client.resumeNext();
+    }
+  }
 
-    const res = await fetch(url, { method: "POST" });
-    if (!res.ok) {
-      throw new Error(`Failed to resume barrier: HTTP ${res.status}`);
+  async getFiredCount(): Promise<number> {
+    return this.client.getRuleFiredCount(this.id);
+  }
+
+  async assertFired(minTimes = 1): Promise<void> {
+    const count = await this.getFiredCount();
+    if (count < minTimes) {
+      throw new Error(
+        `Assertion failed: Rule '${this.id}' was expected to fire at least ${minTimes} time(s), but fired ${count} time(s). Check your SQL pattern and newlines.`
+      );
     }
   }
 }
 
 export class PgInterleaveClient {
-  constructor(private readonly controlUrl = "http://127.0.0.1:9090") {}
+  constructor(public readonly controlUrl = "http://127.0.0.1:9090") {}
 
   static tag(sql: string, sessionTag: string): string {
     return `/* interleave: session=${sessionTag} */ ${sql}`;
@@ -80,6 +134,15 @@ export class PgInterleaveClient {
     const res = await fetch(`${this.controlUrl}/reset`, { method: "POST" });
     if (!res.ok) {
       throw new Error(`Failed to reset proxy: HTTP ${res.status}`);
+    }
+  }
+
+  async resume(barrierId: string): Promise<void> {
+    const res = await fetch(`${this.controlUrl}/resume/${barrierId}`, {
+      method: "POST",
+    });
+    if (!res.ok) {
+      throw new Error(`Failed to resume barrier '${barrierId}': HTTP ${res.status}`);
     }
   }
 
@@ -99,6 +162,14 @@ export class PgInterleaveClient {
       throw new Error(`Failed to fetch active barriers: HTTP ${res.status}`);
     }
     return (await res.json()) as string[];
+  }
+
+  async getRuleFiredCount(ruleId: string): Promise<number> {
+    const res = await fetch(`${this.controlUrl}/rules`);
+    if (!res.ok) return 0;
+    const rules = (await res.json()) as Array<{ id: string; fired_count: number }>;
+    const rule = rules.find((r) => r.id === ruleId);
+    return rule ? rule.fired_count : 0;
   }
 
   async hasTimeouts(): Promise<boolean> {
@@ -133,10 +204,7 @@ export class PgInterleaveClient {
     };
 
     if (options.onQueryMatch) {
-      payload.queryPattern =
-        typeof options.onQueryMatch === "string"
-          ? options.onQueryMatch
-          : options.onQueryMatch.source;
+      payload.queryPattern = regexToRustPattern(options.onQueryMatch);
     }
 
     if (options.ast) {
@@ -160,17 +228,19 @@ export class PgInterleaveClient {
       throw new Error(`Failed to register interceptor: HTTP ${res.status} - ${errBody}`);
     }
 
-    return new BarrierHandle(this.controlUrl);
+    const data = (await res.json()) as { rule_id?: string; barrier_id?: string };
+    const id = data.rule_id || data.barrier_id || "rule";
+    return new BarrierHandle(this, id, data.barrier_id);
   }
 
-  async injectTornCommit(client: Client, times = 1): Promise<void> {
+  async injectTornCommit(client: Client, times = 1): Promise<RuleHandle> {
     const pid = await this.getPid(client);
     const res = await fetch(`${this.controlUrl}/intercept`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         target_pid: pid,
-        query_pattern: "COMMIT",
+        query_pattern: regexToRustPattern("COMMIT"),
         action: "drop_connection_on_commit",
         times,
       }),
@@ -179,6 +249,10 @@ export class PgInterleaveClient {
     if (!res.ok) {
       throw new Error(`Failed to inject torn commit: HTTP ${res.status}`);
     }
+
+    const data = (await res.json()) as { rule_id?: string };
+    const id = data.rule_id || "rule";
+    return new DefaultRuleHandle(this, id);
   }
 
   async flushTrace(): Promise<void> {
@@ -195,16 +269,13 @@ export class PgInterleaveClient {
     clientPid?: number;
     onQueryMatch: string | RegExp;
     times?: number;
-  }): Promise<void> {
+  }): Promise<RuleHandle> {
     let pid = options.clientPid;
     if (!pid && options.client) {
       pid = await this.getPid(options.client);
     }
 
-    const pattern =
-      typeof options.onQueryMatch === "string"
-        ? options.onQueryMatch
-        : options.onQueryMatch.source;
+    const pattern = regexToRustPattern(options.onQueryMatch);
 
     const res = await fetch(`${this.controlUrl}/intercept`, {
       method: "POST",
@@ -220,5 +291,9 @@ export class PgInterleaveClient {
     if (!res.ok) {
       throw new Error(`Failed to inject deadlock rule: HTTP ${res.status}`);
     }
+
+    const data = (await res.json()) as { rule_id?: string };
+    const id = data.rule_id || "rule";
+    return new DefaultRuleHandle(this, id);
   }
 }

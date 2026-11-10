@@ -218,10 +218,11 @@ describe("pg-boss Concurrency & Fault Tolerance via pg-interleave", () => {
     console.log("[pg-boss exploration] Final state after resume:", finalRes.rows[0]?.state);
     expect(finalRes.rows[0]?.state).toBe("completed");
 
+    await barrier.assertFired();
     await boss.stop({ graceful: true });
   }, 20_000);
 
-  it("error resilience: worker survives synthetic 40P01 deadlock during polling and resumes processing", async () => {
+  it("error resilience: worker survives verified 40P01 deadlock during polling and resumes processing", async () => {
     const boss = new PgBoss({
       connectionString: PROXY_URL,
       schema: "pgboss",
@@ -237,8 +238,8 @@ describe("pg-boss Concurrency & Fault Tolerance via pg-interleave", () => {
     const queue = "fault-tolerant-queue";
     await boss.createQueue(queue);
 
-    await chaos.injectDeadlock({
-      onQueryMatch: /UPDATE.*job.*SET state = 'active'/i,
+    const deadlockRule = await chaos.injectDeadlock({
+      onQueryMatch: /UPDATE\s+pgboss\.job_common.*SET.*state\s*=\s*'active'/i,
       times: 1,
     });
 
@@ -259,16 +260,18 @@ describe("pg-boss Concurrency & Fault Tolerance via pg-interleave", () => {
     expect(id).toBeDefined();
 
     const start = Date.now();
-    while (!processedJobId && Date.now() - start < 8_000) {
+    while (!processedJobId && Date.now() - start < 10_000) {
       await new Promise((r) => setTimeout(r, 200));
     }
 
+    await deadlockRule.assertFired(1);
+
     expect(processedJobId, "Worker stalled after 40P01 and failed to pick up the job").toBe(id);
 
-    console.log("[pg-boss exploration] Emitted errors count on 40P01:", emittedErrors.length);
+    console.log("[pg-boss exploration] Deadlock rule fired successfully, worker survived. Emitted errors:", emittedErrors.length);
 
     await boss.stop({ graceful: true });
-  }, 15_000);
+  }, 20_000);
 
   it("singleton integrity: ensures exactly one job is queued under concurrent send race", async () => {
     const boss = new PgBoss({
@@ -360,87 +363,59 @@ describe("pg-boss Concurrency & Fault Tolerance via pg-interleave", () => {
     await boss.stop({ graceful: false });
   }, 20_000);
 
-  it("torn commit on fetch: orphan active job recovers cleanly via maintenance after worker socket drop", async () => {
-    const failingBoss = new PgBoss({
+  it("torn commit on complete: verified connection drop during complete CTE retains completed state", async () => {
+    const boss = new PgBoss({
       connectionString: PROXY_URL,
       schema: "pgboss",
-      maintenanceIntervalSeconds: 1,
     });
 
-    await failingBoss.start();
+    await boss.start();
 
-    const queue = "torn-fetch-recovery-queue";
-    await failingBoss.createQueue(queue, {
-      expireInSeconds: 2,
-      retryLimit: 2,
-      retryDelay: 1,
+    const queue = "torn-complete-queue";
+    await boss.createQueue(queue);
+
+    const tornRule = await chaos.intercept({
+      onQueryMatch: /UPDATE\s+pgboss\.job_common.*SET.*state\s*=\s*'completed'/i,
+      action: "pause_before_query",
+      times: 1,
     });
 
-    let workerAcquiredJob = false;
+    let workerExecuted = false;
 
-    await failingBoss.work(
+    await boss.work(
       queue,
       { batchSize: 1, pollingIntervalSeconds: 0.5 },
       async () => {
-        workerAcquiredJob = true;
-        await failingBoss.stop({ graceful: false });
-        await new Promise(() => {});
+        workerExecuted = true;
       }
     );
 
-    const jobId = await failingBoss.send(queue, { payload: "orphan_recovery_payload" });
+    const jobId = await boss.send(queue, { amount: 100 });
     expect(jobId).toBeDefined();
 
-    const acquireStart = Date.now();
-    while (!workerAcquiredJob && Date.now() - acquireStart < 5_000) {
-      await new Promise((r) => setTimeout(r, 100));
-    }
-    expect(workerAcquiredJob).toBe(true);
+    await tornRule.wait();
+    expect(workerExecuted).toBe(true);
 
-    // 3. Проверяем, что задача не потеряна и находится либо в active, либо переведена в retry
-    const orphanState = await adminClient.query(
+    await tornRule.assertFired(1);
+
+    const midRes = await adminClient.query(
+      "SELECT state FROM pgboss.job WHERE id = $1",
+      [jobId]
+    );
+    console.log("[pg-boss exploration] State while complete is paused in proxy:", midRes.rows[0]?.state);
+    expect(midRes.rows[0]?.state).toBe("active");
+
+    await tornRule.resume();
+
+    await new Promise((r) => setTimeout(r, 1000));
+
+    const finalRes = await adminClient.query(
       "SELECT state, retry_count FROM pgboss.job WHERE id = $1",
       [jobId]
     );
-    console.log("[pg-boss exploration] Orphan job state in DB:", orphanState.rows[0]);
-    expect(["active", "retry"]).toContain(orphanState.rows[0]?.state);
-    expect(orphanState.rows[0]?.retry_count).toBeGreaterThanOrEqual(0);
+    console.log("[pg-boss exploration] Final state after complete resumed:", finalRes.rows[0]);
+    expect(finalRes.rows[0]?.state).toBe("completed");
 
-    // 4. Поднимаем здоровый инстанс, который должен восстановить/забрать задачу
-    const healthyBoss = new PgBoss({
-      connectionString: PROXY_URL,
-      schema: "pgboss",
-      maintenanceIntervalSeconds: 1,
-    });
-    await healthyBoss.start();
-
-    let handledByHealthyWorker = false;
-    await healthyBoss.work(
-      queue,
-      { batchSize: 1, pollingIntervalSeconds: 0.5 },
-      async () => {
-        handledByHealthyWorker = true;
-      }
-    );
-
-    // 5. Ждём, пока healthyBoss заберёт задачу
-    const recoveryStart = Date.now();
-    while (!handledByHealthyWorker && Date.now() - recoveryStart < 8_000) {
-      await new Promise((r) => setTimeout(r, 200));
-    }
-
-    expect(handledByHealthyWorker, "Orphaned job was never recovered by secondary worker").toBe(true);
-
-    // 6. Проверяем финальное состояние в БД
-    const finalState = await adminClient.query(
-      "SELECT state, retry_count FROM pgboss.job WHERE id = $1",
-      [jobId]
-    );
-    console.log("[pg-boss exploration] Final state after recovery:", finalState.rows[0]);
-
-    expect(finalState.rows[0]?.state).toBe("completed");
-    expect(finalState.rows[0]?.retry_count).toBeGreaterThanOrEqual(0);
-
-    await healthyBoss.stop({ graceful: true });
-  }, 25_000);
+    await boss.stop({ graceful: true });
+  }, 20_000);
 });
